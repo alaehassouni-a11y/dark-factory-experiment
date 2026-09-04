@@ -247,14 +247,30 @@ def scenario_every_session_route_is_guarded_and_tokens_do_not_cross() -> None:
 
     from backend.main import app
 
-    routes = []
-    for r in app.routes:
-        path = getattr(r, "path", "") or ""
-        if not path.startswith("/api"):
-            continue
-        dep = getattr(r, "dependant", None)
-        routes.append((path, frozenset(getattr(r, "methods", None) or []),
-                       len(dep.dependencies) if dep is not None else -1))
+    def walk(entries, prefix: str = ""):
+        """Every route the app will actually serve, (path, methods, dependency count).
+
+        FastAPI 0.141+ keeps an included router NESTED - an `_IncludedRouter` carrying
+        `original_router` and the include prefix - instead of flattening its routes
+        into `app.routes`; older versions flatten. Both shapes are walked. Adapted
+        2026-09-04, the first time this ran against the real dependency set: the
+        top level held three routes, all public, and every session route sat
+        unexamined one level down. Only the count assertion below noticed. The
+        assertions themselves are unchanged from the day they were written."""
+        for r in entries:
+            inner = getattr(r, "original_router", None)
+            if inner is not None:
+                ctx = getattr(r, "include_context", None)
+                yield from walk(inner.routes, prefix + (getattr(ctx, "prefix", "") or ""))
+                continue
+            path = prefix + (getattr(r, "path", "") or "")
+            if not path.startswith("/api"):
+                continue
+            dep = getattr(r, "dependant", None)
+            yield (path, frozenset(getattr(r, "methods", None) or []),
+                   len(dep.dependencies) if dep is not None else -1)
+
+    routes = list(walk(app.routes))
     expect("the app actually assembled some API routes", len(routes) >= 6,
            f"found {len(routes)}")
 
