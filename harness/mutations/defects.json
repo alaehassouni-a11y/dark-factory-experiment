@@ -1,8 +1,8 @@
 {
   "_what_this_is": [
-    "Deliberate defects injected into REAL source on a throwaway copy of the tree. Each",
+    "Deliberate defects injected into REAL source, one at a time, restored with git. Each",
     "must make the gate go red. One that escapes is a class of bug that can currently",
-    "merge into DynaChat with nobody reading the diff.",
+    "merge into the Virtual Agent with nobody reading the diff.",
     "",
     "This is the ONLY thing in the gate that measures the HARNESS rather than the code.",
     "Until one of these has been injected and caught there is no evidence any check here",
@@ -12,46 +12,76 @@
   ],
 
   "_archetypes_covered": [
-    "an invariant raised out of range    -> cap-raised-to-100",
-    "an output made constant            -> lock-key-is-constant",
-    "a normaliser dropped               -> uuid-normaliser-dropped",
-    "a guard removed                    -> conversations-list-loses-its-guard",
+    "an invariant raised out of range     -> cap-raised-to-1000, window-shrunk-to-an-hour",
+    "a set widened                        -> language-set-gains-spanish",
+    "an order inverted                    -> web-before-wiki",
+    "a guard removed                      -> transcript-loses-its-guard",
+    "an output made constant              -> source-is-always-wiki, arabic-never-detected",
+    "a live property quietly dropped      -> sentences-only-at-the-end",
     "",
-    "All four aim at MISSION hard invariants 1 and 2, which are the two the factory is",
-    "least able to recover from getting wrong and the two issue #361 turned on."
+    "Every defect is TYPE-CLEAN and LINT-CLEAN on purpose. A mutation that ruff or mypy",
+    "catches has measured the compiler, not the harness. They aim at MISSION hard",
+    "invariants 1 through 5 and at the one property the requirement calls 'live'."
   ],
 
-  "_written": "2026-08-13, at the same time as the holdout. See .factory/holdout/run.py for why that date is stated rather than buried.",
+  "_written": "2026-09-04, the day after the holdout, against the first implementation.",
 
   "defects": [
     {
-      "id": "cap-raised-to-100",
+      "id": "cap-raised-to-1000",
       "file": "app/backend/rate_limit.py",
-      "find": "DAILY_MESSAGE_CAP: int = 25",
-      "replace": "DAILY_MESSAGE_CAP: int = 100",
-      "why": "MISSION hard invariant 1 is a specific number, not 'there is a limit'. A cap silently raised 4x still rate-limits, still passes every test that asserts a limit exists, and quietly quadruples the OpenRouter bill this invariant was written to protect."
+      "find": "DAILY_TURN_CAP: int = 100",
+      "replace": "DAILY_TURN_CAP: int = 1000",
+      "why": "MISSION hard invariant 5 is a specific number, not 'there is a limit'. Every unit test reads the constant symbolically and keeps passing; only a check that knows the number can see it moved. Ten times the inference budget, silently."
     },
     {
-      "id": "lock-key-is-constant",
+      "id": "window-shrunk-to-an-hour",
       "file": "app/backend/rate_limit.py",
-      "find": "    key = hi ^ lo",
-      "replace": "    key = (hi ^ lo) % 1",
-      "why": "An output made constant. Every user now serialises on ONE advisory lock: the limiter still works for a single user and still passes its unit tests, but under concurrency unrelated users block each other, and a shared lock is one refactor away from a shared COUNT.",
-      "_why_this_shape": "`% 1` rather than `= 0` ON PURPOSE. The obvious mutation leaves `hi` and `lo` unused, so ruff flags it and STATIC catches a defect that was meant to probe the holdout. This version still reads both halves and still type-checks, so it is invisible to every rung below the independence line - which is the only way this defect measures the thing it was written to measure."
+      "find": "WINDOW_HOURS: int = 24",
+      "replace": "WINDOW_HOURS: int = 1",
+      "why": "The same invariant from the other side: a cap per hour instead of per day is a cap 24 times larger. Still a limit, still enforced, still wrong."
     },
     {
-      "id": "uuid-normaliser-dropped",
-      "file": "app/backend/rate_limit.py",
-      "find": "    uid = _as_uuid(user_id)",
-      "replace": "    uid = user_id",
-      "why": "The two entry points accept UUID | str and normalise before deriving the lock key. Drop it on one path and that path locks under a different key from the other, so the two stop serialising and the effective cap doubles. Invisible to either function's own test."
+      "id": "language-set-gains-spanish",
+      "file": "app/backend/languages.py",
+      "find": "frozenset({\"fr\", \"en\", \"de\", \"ar\"})",
+      "replace": "frozenset({\"fr\", \"en\", \"de\", \"ar\", \"es\"})",
+      "why": "MISSION hard invariant 1. A fifth language with no voice, no greeting and no detection is the exact shape a well-meaning issue would leave behind. Type-clean: a frozenset of strings is a frozenset of strings."
     },
     {
-      "id": "conversations-list-loses-its-guard",
-      "file": "app/backend/routes/conversations.py",
-      "find": "async def list_conversations(current_user: dict[str, Any] = Depends(get_current_user)):",
-      "replace": "async def list_conversations():",
-      "why": "A guard removed. MISSION hard invariant 2 - authentication required for all chat access. The route still returns data, the app still boots, and every OTHER auth test still passes, because they each call a route they already know about. Only a check that walks the assembled app can see a route that lost its dependency."
+      "id": "arabic-never-detected",
+      "file": "app/backend/languages.py",
+      "find": "if ratio >= 0.3:",
+      "replace": "if ratio >= 1.3:",
+      "why": "An output made constant for one of the four: Arabic script can never reach a ratio above one, so Arabic clients are asked, forever, to continue in a supported language. Everything else keeps working."
+    },
+    {
+      "id": "web-before-wiki",
+      "file": "app/backend/agent/pipeline.py",
+      "find": "if self.wiki.is_confident(hits):",
+      "replace": "if not self.wiki.is_confident(hits):",
+      "why": "MISSION hard invariant 2, inverted. Every question the wiki covers now goes to the web and every question it does not cover is composed from unrelated excerpts. Both paths still return an answer with a declared source, so nothing crashes."
+    },
+    {
+      "id": "source-is-always-wiki",
+      "file": "app/backend/agent/pipeline.py",
+      "find": "source: TurnSource = \"wiki\" if context_kind == \"wiki\" else \"web\"",
+      "replace": "source: TurnSource = \"wiki\" if context_kind else \"web\"",
+      "why": "MISSION hard invariant 3. A web answer labelled as a wiki answer is the product lying about where it got its answer, which is the one thing the PRD says the product is. Type-clean: a non-empty string is truthy."
+    },
+    {
+      "id": "transcript-loses-its-guard",
+      "file": "app/backend/routes/sessions.py",
+      "find": "async def read_session(session: Session = Depends(get_current_session)) -> dict[str, object]:\n    return session.to_dict()",
+      "replace": "async def read_session(session_id: str) -> dict[str, object]:\n    found = store.get(session_id)\n    if found is None:\n        raise HTTPException(status_code=404, detail=\"Unknown session\")\n    return found.to_dict()",
+      "why": "A guard removed. MISSION hard invariant 4: anyone with a session id can now read its transcript. The route still 404s on unknown ids and still returns the right shape, so it looks finished. Only a check that walks the assembled app, or actually tries another token, can see it."
+    },
+    {
+      "id": "sentences-only-at-the-end",
+      "file": "app/backend/agent/pipeline.py",
+      "find": "for sentence in splitter.feed(piece):",
+      "replace": "for sentence in splitter.feed(piece)[:0]:",
+      "why": "The requirement's word is 'live'. With this, no sentence event fires until the whole reply has streamed, so the app speaks nothing until the end. Every token still arrives, the final flush still emits the last sentence, the turn still closes. Type-clean: a slice of a list is a list."
     }
   ]
 }

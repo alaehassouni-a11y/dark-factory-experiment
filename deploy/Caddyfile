@@ -1,13 +1,14 @@
 {
-    email cole@dynamous.ai
+    email ops@example.com
 }
 
-chat.dynamous.ai {
+# Replace agent.example.com and ops@example.com with the real hostname and Let's Encrypt contact before the first deploy.
+agent.example.com {
     encode zstd gzip
 
     # Which app container is live is decided by upstream.conf, which the
-    # deploy script (/opt/dynachat/deploy.sh) rewrites on each blue/green
-    # swap and then triggers a graceful `caddy reload`. FastAPI serves
-    # both /api/* and the built frontend static assets from the same origin.
+    # deploy script (/opt/virtualagent/deploy.sh) rewrites on each blue/green
+    # swap and then triggers a graceful `caddy reload`. FastAPI serves only
+    # /api/* — the iOS app is the sole client and there are no static assets.
     import /etc/caddy/upstream.conf
 }

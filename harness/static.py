@@ -1,55 +1,51 @@
 #!/usr/bin/env python3
-"""The static rung, across BOTH halves of DynaChat.
+"""The static rung: the Python service, plus what can honestly be checked of the iOS app.
 
-`ci.py` runs one command per rung, and this repo has two stacks. Rather than teach the
-ladder about that - the ladder is the same in every factory and should stay that way -
-the split lives here, behind one command that `harness.config.json` can name.
-
-The commands are lifted verbatim from `.archon/workflows/dark-factory-validate-pr.yaml`
-(`static-checks-backend-p1` / `static-checks-frontend-p1`) so there is ONE definition of
-what "static passes" means for this repo. If you change one, change the other, or the
-gate and the workflow start disagreeing about a green build.
+`ci.py` runs one command per rung; the split lives here so the ladder stays the ladder.
 
     python harness/static.py
 
-Exits non-zero if any check fails. Prints which one, because "static failed" across two
-languages and five tools is not a diagnosis.
+The service: ruff (lint), ruff (format), mypy, all under the backend's own environment so
+the versions are the pinned ones. The app: `static_ios.py`, which parses the XcodeGen spec
+and the Info.plist and sanity-checks every Swift file - NOT a compile. There is no Swift
+toolchain on the machines this gate runs on, and a check that pretends otherwise would be
+a smaller check wearing a bigger check's name. The count printed at the end is of checks
+that RAN; four tools silently becoming three is the shape of every bug this repo has
+filed against its own gate.
 """
 from __future__ import annotations
 
+import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BACKEND = ROOT / "app" / "backend"
-FRONTEND = ROOT / "app" / "frontend"
+UV = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv")
 
-# (label, cwd, argv). Kept as argv rather than shell strings: `ci.py` resolves argv[0]
-# through shutil.which for the Windows .cmd-shim problem, and a shell string would
-# reintroduce the quoting bugs that ate 2026-04-14.
 CHECKS = [
-    ("ruff-lint",   BACKEND,  ["uv", "run", "ruff", "check", "."]),
-    ("ruff-format", BACKEND,  ["uv", "run", "ruff", "format", "--check", "."]),
-    ("mypy",        BACKEND,  ["uv", "run", "mypy", "."]),
-    ("tsc",         FRONTEND, ["bun", "run", "tsc", "--noEmit"]),
-    ("biome",       FRONTEND, ["bun", "x", "biome", "check", "src"]),
+    ("ruff-lint", BACKEND, [UV, "run", "ruff", "check", "."]),
+    ("ruff-format", BACKEND, [UV, "run", "ruff", "format", "--check", "."]),
+    ("mypy", BACKEND, [UV, "run", "mypy", "."]),
+    ("ios-manifests", BACKEND, [UV, "run", "python", str(ROOT / "harness" / "static_ios.py")]),
 ]
 
 
 def main() -> int:
     failed: list[str] = []
     ran = 0
+    env = dict(os.environ)
+    env.pop("VIRTUAL_ENV", None)
 
     for label, cwd, argv in CHECKS:
         if not cwd.exists():
-            # LOUD. A missing half is not a passing half - that is the whole argument of
-            # this harness, applied to itself.
             print(f"STATIC_MISSING {label}: {cwd} does not exist", flush=True)
             failed.append(label)
             continue
         try:
-            p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
+            p = subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True,
                                encoding="utf-8", errors="replace", timeout=600)
         except FileNotFoundError:
             print(f"STATIC_MISSING {label}: {argv[0]} is not on PATH", flush=True)
@@ -71,9 +67,6 @@ def main() -> int:
     if failed:
         print(f"STATIC_FAILED checks={','.join(failed)}", flush=True)
         return 1
-
-    # A COUNT, not just a name. Five tools silently becoming three is the shape of every
-    # bug this repo has filed against its own gate.
     print(f"STATIC_OK checks={ran}", flush=True)
     return 0
 

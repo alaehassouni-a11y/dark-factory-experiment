@@ -4,9 +4,10 @@ description: |
             the dark-factory-experiment repo. NOT triggered by the 4-hour
             orchestrator - runs on its own separate schedule.
   Triggers: Weekly cron (0 6 * * 1 UTC), or manual "run comprehensive test".
-  Does: Checks out main -> starts backend+frontend on dynamic free ports ->
-        runs 4 agent-browser scenarios sequentially against the real UI
-        (chat, video ingestion, RAG citations, conversation history) ->
+  Does: Checks out main -> starts the Virtual Agent service on a dynamic
+        free port against stub providers -> runs 4 API scenarios sequentially
+        against the running service (session and greeting, wiki coverage,
+        web fallback, language following and privacy) ->
         tears down -> synthesizes a report -> auto-files GitHub issues on
         failures (with dedup) so triage picks them up and the factory
         heals itself.
@@ -27,31 +28,32 @@ description: |
   Unlike validate-pr, this workflow is NOT bound by the holdout principle -
   it runs against main (which is already merged code), so there's nothing to
   hold out from. It can read anything, run anything, and its only output is
-  "did this feature still work when I exercised it through the browser?".
+  "did this feature still work when I exercised it through the API the iOS
+  app is written against?" (`docs/API.md`).
 
-  Prerequisite: `agent-browser` must be installed and available on PATH. On
-  the dark-factory VPS this is installed globally (v0.25.3 + Chrome for
-  Testing). Locally, `npm i -g agent-browser && agent-browser install`.
-  See the `.claude/skills/agent-browser/SKILL.md` skill for CLI reference.
+  Prerequisite: `uv` on PATH and a `python` that can run `harness/serve.py`.
+  The iOS app cannot run on the factory's machines, so every scenario drives
+  the service with `curl`: open a session, send turns, read the SSE stream
+  and the transcript.
 
   =====================================================================
   TEST FIXTURES (locked)
   =====================================================================
 
-  Canonical test YouTube video for ingestion + RAG scenarios:
-    https://www.youtube.com/watch?v=pjF-0dliYhg
-
-  This URL is referenced by test-video-ingestion AND test-rag-response -
-  ingestion adds it to the library, then the RAG test asks a question
-  grounded in its transcript and asserts the response cites it. Do NOT
-  change this URL without updating both scenario command files together.
+  `harness/serve.py` starts the service against `harness/fixtures/wiki`
+  (opening hours in English and French, a returns policy) and stub
+  providers (a deterministic OpenAI-shaped model, a Brave-shaped search).
+  The wiki-coverage scenario asks about opening hours and expects source
+  `wiki`; the web-fallback scenario asks something the wiki cannot answer
+  ("Wer hat die Mona Lisa gemalt?") and expects source `web`. Do NOT
+  change the fixture wiki without updating both scenario command files.
 
 provider: claude
 model: sonnet
 
 nodes:
   # =====================================================================
-  # PHASE 1: SETUP - checkout main, install deps, start the app
+  # PHASE 1: SETUP - checkout main, install deps, start the service
   # =====================================================================
 
   - id: pull-latest
@@ -83,23 +85,10 @@ nodes:
   - id: allocate-ports
     bash: |
       set -euo pipefail
-      # Backend MUST use port 8000. The Vite dev server proxy in
-      # vite.config.ts is hardcoded to forward /api/* to localhost:8000.
-      # The frontend code (api.ts) uses relative `/api/...` paths that
-      # go through this proxy. Using a dynamic backend port breaks
-      # every browser-based test because the proxy target doesn't match.
-      #
-      # If port 8000 is occupied (e.g. another workflow is running),
-      # fail fast rather than silently starting on a port the frontend
-      # can't reach.
-      BACKEND_PORT=8000
-      if (echo >/dev/tcp/127.0.0.1/$BACKEND_PORT) 2>/dev/null; then
-        echo "ERROR: port $BACKEND_PORT already in use - cannot start backend" >&2
-        exit 1
-      fi
-
-      # Frontend port can be dynamic - agent-browser reads it from the
-      # artifact file and connects directly.
+      # The service is one FastAPI process and its only client is the iOS
+      # app, so nothing on this machine hardcodes its port. Pick a free one
+      # so a concurrent validate-pr run never collides; every scenario
+      # reads it from the artifact file.
       find_free_port() {
         local start=$1 end=$2
         for port in $(seq $start $end); do
@@ -109,11 +98,10 @@ nodes:
         done
         echo "ERROR: no free port in range $start-$end" >&2; return 1
       }
-      FRONTEND_PORT=$(find_free_port 16100 16999)
+      BACKEND_PORT=$(find_free_port 16100 16999)
 
-      echo "$BACKEND_PORT"  > "$ARTIFACTS_DIR/.backend-port"
-      echo "$FRONTEND_PORT" > "$ARTIFACTS_DIR/.frontend-port"
-      echo "Allocated backend=$BACKEND_PORT frontend=$FRONTEND_PORT"
+      echo "$BACKEND_PORT" > "$ARTIFACTS_DIR/.backend-port"
+      echo "Allocated backend=$BACKEND_PORT"
     depends_on: [pull-latest]
     timeout: 10000
 
@@ -123,9 +111,6 @@ nodes:
       export PATH="$HOME/.local/bin:$PATH"
       echo "=== Backend deps (uv sync) ==="
       (cd app/backend && uv sync --all-extras 2>&1 | tail -10)
-      echo ""
-      echo "=== Frontend deps (bun install) ==="
-      (cd app/frontend && bun install 2>&1 | tail -10)
     depends_on: [pull-latest]
     idle_timeout: 300000
 
@@ -134,127 +119,83 @@ nodes:
       set -euo pipefail
       export PATH="$HOME/.local/bin:$PATH"
 
-      # Load the validation-sandbox env file. The backend hard-requires
-      # DATABASE_URL (Postgres) and other secrets at import time; without
-      # sourcing validation.env, uvicorn crashes at backend/config.py
-      # before the /api/health endpoint ever responds and all four agent-
-      # browser scenarios get skipped with no evidence. Same pattern as
-      # validate-pr's start-app (commit 3fc03a0).
-      #
-      # Path is overridable via DARK_FACTORY_VALIDATION_ENV; defaults to
-      # /opt/dark-factory/validation.env on the VPS. That file must exist
-      # outside the repo and contain at minimum:
-      #   DATABASE_URL, OPENROUTER_API_KEY, JWT_SECRET, SUPADATA_API_KEY,
-      #   YOUTUBE_CHANNEL_ID
-      # Use a DEDICATED validation database — not production — so the
-      # weekly comprehensive test can't pollute real user data even when
-      # scenarios create conversations / ingest videos.
-      VALIDATION_ENV="${DARK_FACTORY_VALIDATION_ENV:-/opt/dark-factory/validation.env}"
-      if [ -f "$VALIDATION_ENV" ]; then
-        echo "Loading validation env from $VALIDATION_ENV"
-        set -a
-        # shellcheck disable=SC1090
-        . "$VALIDATION_ENV"
-        set +a
+      # `harness/serve.py` is the ONLY way the factory starts the service for
+      # validation. It boots stub providers (an OpenAI-shaped model and a
+      # Brave-shaped search) on a free port, points the service at them and
+      # at `harness/fixtures/wiki` through the same environment variables
+      # production uses, then runs uvicorn as a child that dies with it. No
+      # secrets, no network, no env file: the whole journey in docs/API.md
+      # runs against stubs, so this node needs nothing from the VPS. It
+      # refuses loudly (APP_START_REFUSED) when `uv` is missing.
+      PYTHON=$(command -v python || command -v python3)
+
+      # Normal path: the port comes from allocate-ports via artifacts.
+      # Demo/manual path: if the port file is missing (someone ran this node
+      # in isolation), allocate one the same way and write it so downstream
+      # nodes that read the file still work.
+      if [ -f "$ARTIFACTS_DIR/.backend-port" ]; then
+        BACKEND_PORT=$(cat "$ARTIFACTS_DIR/.backend-port")
       else
-        echo "WARN: validation env file not found at $VALIDATION_ENV" >&2
-        echo "WARN: backend will likely fail to boot without DATABASE_URL and friends" >&2
+        find_free_port() {
+          local start=$1 end=$2
+          for port in $(seq $start $end); do
+            if ! (echo >/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
+              echo $port; return 0
+            fi
+          done
+          echo "ERROR: no free port in range $start-$end" >&2; return 1
+        }
+        BACKEND_PORT=$(find_free_port 16100 16999)
+        echo "$BACKEND_PORT" > "$ARTIFACTS_DIR/.backend-port"
+        echo "WARN: .backend-port missing, allocated $BACKEND_PORT" >&2
       fi
-
-      # Fail fast with a clear message if required vars are missing, so
-      # this node's error lands in the comprehensive-test-report rather
-      # than a cryptic uvicorn stacktrace inside $ARTIFACTS_DIR/app-logs.
-      REQUIRED_VARS=(DATABASE_URL OPENROUTER_API_KEY JWT_SECRET SUPADATA_API_KEY YOUTUBE_CHANNEL_ID)
-      MISSING=()
-      for v in "${REQUIRED_VARS[@]}"; do
-        if [ -z "${!v:-}" ]; then MISSING+=("$v"); fi
-      done
-      if [ ${#MISSING[@]} -gt 0 ]; then
-        echo "ERROR: required env vars missing for comprehensive-test sandbox: ${MISSING[*]}" >&2
-        echo "ERROR: populate $VALIDATION_ENV (outside the repo) and retry." >&2
-        exit 1
-      fi
-
-      BACKEND_PORT=$(cat "$ARTIFACTS_DIR/.backend-port")
-      FRONTEND_PORT=$(cat "$ARTIFACTS_DIR/.frontend-port")
 
       mkdir -p "$ARTIFACTS_DIR/app-logs"
 
-      # Backend: uvicorn on dynamic port, logs to artifacts
-      (
-        cd app
-        nohup uv --project backend run uvicorn backend.main:app \
-          --host 127.0.0.1 --port "$BACKEND_PORT" \
-          > "$ARTIFACTS_DIR/app-logs/backend.log" 2>&1 &
-        echo $! > "$ARTIFACTS_DIR/.backend-pid"
-      )
+      # Service + stub providers, in the background, logs to artifacts.
+      nohup "$PYTHON" harness/serve.py --port "$BACKEND_PORT" > "$ARTIFACTS_DIR/app-logs/backend.log" 2>&1 &
+      echo $! > "$ARTIFACTS_DIR/.backend-pid"
 
-      # Frontend: vite dev server on dynamic port, with VITE_API_BASE set so
-      # the frontend hits the right backend port (the vite proxy is known
-      # broken - see CLAUDE.md footguns).
-      (
-        cd app/frontend
-        VITE_API_BASE="http://127.0.0.1:$BACKEND_PORT" \
-        nohup bun run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort \
-          > "$ARTIFACTS_DIR/app-logs/frontend.log" 2>&1 &
-        echo $! > "$ARTIFACTS_DIR/.frontend-pid"
-      )
-
-      # Wait for backend health. DynaChat exposes /api/health (NOT /health).
+      # Wait for health. The service answers GET /api/health with
+      # {"status":"ok",...} once the wiki has loaded (boot can take a
+      # while on a cold worktree: uv resolves the venv first).
       echo "Waiting for backend on :$BACKEND_PORT ..."
-      for i in $(seq 1 60); do
-        if curl -sf "http://127.0.0.1:$BACKEND_PORT/api/health" > /dev/null 2>&1; then
+      for i in $(seq 1 90); do
+        if curl -sf "http://127.0.0.1:$BACKEND_PORT/api/health" 2>/dev/null | grep -qE '"status": ?"ok"'; then
           echo "backend up after ${i}s"; break
         fi
-        if [ $i -eq 60 ]; then
-          echo "ERROR: backend failed to start in 60s" >&2
+        if [ $i -eq 90 ]; then
+          echo "ERROR: backend failed to start in 90s" >&2
           tail -50 "$ARTIFACTS_DIR/app-logs/backend.log" >&2
           exit 1
         fi
         sleep 1
       done
 
-      echo "Waiting for frontend on :$FRONTEND_PORT ..."
-      for i in $(seq 1 60); do
-        if curl -sf "http://127.0.0.1:$FRONTEND_PORT" > /dev/null 2>&1; then
-          echo "frontend up after ${i}s"; break
-        fi
-        if [ $i -eq 60 ]; then
-          echo "ERROR: frontend failed to start in 60s" >&2
-          tail -50 "$ARTIFACTS_DIR/app-logs/frontend.log" >&2
-          exit 1
-        fi
-        sleep 1
-      done
-
-      # Capture initial health snapshot for the ingestion test to diff against
-      curl -sf "http://127.0.0.1:$BACKEND_PORT/api/health" \
-        > "$ARTIFACTS_DIR/health-before.json" || true
-
-      echo "APP_STARTED backend=$BACKEND_PORT frontend=$FRONTEND_PORT"
+      echo "APP_STARTED backend=$BACKEND_PORT"
     depends_on: [install-deps, allocate-ports]
     idle_timeout: 180000
 
   # =====================================================================
-  # PHASE 2: SCENARIO TESTS (sequential, agent-browser state is global)
+  # PHASE 2: SCENARIO TESTS (sequential, one service, shared stub counters)
   # =====================================================================
-  # agent-browser maintains a single shared browser session on the VPS.
-  # Parallel scenario nodes would race each other opening/closing the same
-  # session. Run them sequentially in a chain. Latency is irrelevant - this
+  # All four scenarios drive the same running service with curl. The stub
+  # providers count their calls globally and the daily turn cap is counted
+  # per client_id, so scenarios run sequentially in a chain and each opens
+  # its own sessions with its own client_id. Latency is irrelevant - this
   # is a weekly run.
   #
   # Each scenario node:
   #   - runs in fresh context (no knowledge of other scenarios)
-  #   - has allowed_tools: [Bash] + skills: [agent-browser]
+  #   - has allowed_tools: [Bash] (curl against docs/API.md; no source reads)
   #   - outputs structured JSON via output_format
   #   - writes $ARTIFACTS_DIR/test-<name>.md as human-readable evidence
-  #   - takes at least one screenshot for proof
+  #   - saves at least one raw response body under $ARTIFACTS_DIR/test-<name>-*.txt
 
   - id: test-chat-ui
     command: dark-factory-test-chat-ui
     depends_on: [start-app]
     context: fresh
-    skills: [agent-browser]
     idle_timeout: 300000
     output_format:
       type: object
@@ -269,7 +210,6 @@ nodes:
     command: dark-factory-test-video-ingestion
     depends_on: [test-chat-ui]
     context: fresh
-    skills: [agent-browser]
     idle_timeout: 600000
     output_format:
       type: object
@@ -284,7 +224,6 @@ nodes:
     command: dark-factory-test-rag-response
     depends_on: [test-video-ingestion]
     context: fresh
-    skills: [agent-browser]
     idle_timeout: 300000
     output_format:
       type: object
@@ -299,7 +238,6 @@ nodes:
     command: dark-factory-test-conversation-history
     depends_on: [test-rag-response]
     context: fresh
-    skills: [agent-browser]
     idle_timeout: 300000
     output_format:
       type: object
@@ -319,14 +257,10 @@ nodes:
       set +e
       if [ -f "$ARTIFACTS_DIR/.backend-pid" ]; then
         BACKEND_PID=$(cat "$ARTIFACTS_DIR/.backend-pid")
+        # serve.py forwards SIGTERM to its uvicorn child and shuts the stub
+        # providers down with it, so one kill tears down the whole stack.
         kill "$BACKEND_PID" 2>/dev/null && echo "killed backend PID $BACKEND_PID" || echo "backend already dead"
       fi
-      if [ -f "$ARTIFACTS_DIR/.frontend-pid" ]; then
-        FRONTEND_PID=$(cat "$ARTIFACTS_DIR/.frontend-pid")
-        kill "$FRONTEND_PID" 2>/dev/null && echo "killed frontend PID $FRONTEND_PID" || echo "frontend already dead"
-      fi
-      # Best-effort close any lingering agent-browser session
-      agent-browser close 2>/dev/null || true
       echo "TEARDOWN_COMPLETE"
     depends_on:
       - test-chat-ui

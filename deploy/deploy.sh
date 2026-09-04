@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
-# Blue/green deploy script for DynaChat. Polls git, rebuilds inactive color,
-# waits for healthcheck, swaps Caddy upstream with graceful reload, stops old.
-# Safe to run when blue/green isn't set up yet — it detects and no-ops.
+# Blue/green deploy script for the Virtual Agent. Polls git, rebuilds inactive
+# color, waits for healthcheck, swaps Caddy upstream with graceful reload,
+# stops old. Safe to run when blue/green isn't set up yet — it detects and
+# no-ops.
 #
 # This file is the source-of-truth copy; the live VPS copy at
-# /opt/dynachat/deploy.sh is kept in sync by hand. The systemd timer that
+# /opt/virtualagent/deploy.sh is kept in sync by hand. The systemd timer that
 # drives it doesn't pull this from git, so changes here must be mirrored to
 # the VPS to take effect.
+#
+# The wiki (virtualagent/resources/) is copied into the image by the
+# Dockerfile, so a wiki-only commit goes through exactly this path: new image
+# on the inactive color, healthcheck, flip. There is nothing to sync.
 set -euo pipefail
 
-LOG=/var/log/dynachat-deploy.log
-REPO=/opt/dynachat/app
-COMPOSE_DIR=/opt/dynachat/app/deploy
-UPSTREAM_FILE=/opt/dynachat/app/deploy/upstream.conf
-LOCK=/var/run/dynachat-deploy.lock
+LOG=/var/log/virtualagent-deploy.log
+REPO=/opt/virtualagent/app
+COMPOSE_DIR=/opt/virtualagent/app/deploy
+UPSTREAM_FILE=/opt/virtualagent/app/deploy/upstream.conf
+LOCK=/var/run/virtualagent-deploy.lock
 
 exec >>"$LOG" 2>&1
 
@@ -35,19 +40,6 @@ fi
 echo "[$(date -Iseconds)] changes: $LOCAL -> $REMOTE, pulling"
 git pull --ff-only --quiet
 
-# Pull the latest paid Dynamous course/workshop transcripts (issue #147) into
-# the host path that docker-compose mounts read-only into both colors. Loads
-# /opt/dynachat/.env via `set -a` so the helper sees the deploy-key path and
-# host-path overrides without leaking secrets to this script's stdout.
-if [ -f /opt/dynachat/app/deploy/sync-dynamous-content.sh ]; then
-    set -a
-    # shellcheck disable=SC1091
-    source /opt/dynachat/.env
-    set +a
-    bash /opt/dynachat/app/deploy/sync-dynamous-content.sh \
-        || echo "[$(date -Iseconds)] sync-dynamous-content.sh failed (continuing with stale content)"
-fi
-
 cd "$COMPOSE_DIR"
 
 # Reload Caddy reliably. `caddy reload` re-parses the Caddyfile (which imports
@@ -60,7 +52,7 @@ cd "$COMPOSE_DIR"
 swap_caddy_upstream() {
     local expected="$1"   # e.g. "app-green:8000"
     sync
-    docker compose --env-file /opt/dynachat/.env exec -T caddy \
+    docker compose --env-file /opt/virtualagent/.env exec -T caddy \
         caddy reload --config /etc/caddy/Caddyfile || {
             echo "[$(date -Iseconds)] caddy reload returned non-zero — will verify and restart if needed"
         }
@@ -68,7 +60,7 @@ swap_caddy_upstream() {
     # Verify reload took effect by reading the live admin-API config.
     sleep 1
     local live
-    live=$(docker exec dynachat-caddy wget -qO- --timeout=3 \
+    live=$(docker exec virtualagent-caddy wget -qO- --timeout=3 \
         http://127.0.0.1:2019/config/ 2>/dev/null || echo "")
     if echo "$live" | grep -q "$expected"; then
         echo "[$(date -Iseconds)] caddy reload verified — routing to $expected"
@@ -76,11 +68,11 @@ swap_caddy_upstream() {
     fi
 
     echo "[$(date -Iseconds)] WARNING: caddy reload did not apply (live config missing '$expected'). Forcing restart."
-    docker compose --env-file /opt/dynachat/.env restart caddy
+    docker compose --env-file /opt/virtualagent/.env restart caddy
     # Wait briefly for Caddy to come back. We're not strict here — if Caddy
     # itself is broken the next deploy attempt or a human will catch it.
     for i in $(seq 1 15); do
-        if docker exec dynachat-caddy wget -qO- --timeout=2 \
+        if docker exec virtualagent-caddy wget -qO- --timeout=2 \
             http://127.0.0.1:2019/config/ 2>/dev/null | grep -q "$expected"; then
             echo "[$(date -Iseconds)] caddy restart verified — routing to $expected"
             return 0
@@ -92,20 +84,19 @@ swap_caddy_upstream() {
 }
 
 # Gate: require blue/green services + upstream.conf to exist before deploying
-if ! docker compose --env-file /opt/dynachat/.env config --services 2>/dev/null | grep -q '^app-blue$'; then
-    echo "[$(date -Iseconds)] blue/green not yet configured in compose — skipping. Rebuild caddy/postgres only if their configs changed (safe, no app dependency)."
-    # Reload Caddy if its config changed. Postgres changes are manual (data volume).
-    docker compose --env-file /opt/dynachat/.env up -d --no-deps caddy || true
+if ! docker compose --env-file /opt/virtualagent/.env config --services 2>/dev/null | grep -q '^app-blue$'; then
+    echo "[$(date -Iseconds)] blue/green not yet configured in compose — skipping. Reload caddy only if its config changed (safe, no app dependency)."
+    docker compose --env-file /opt/virtualagent/.env up -d --no-deps caddy || true
     exit 0
 fi
 
 if [ ! -f "$UPSTREAM_FILE" ]; then
     echo "[$(date -Iseconds)] upstream.conf missing — initial deploy. Starting app-blue."
     echo 'reverse_proxy app-blue:8000' > "$UPSTREAM_FILE"
-    docker compose --env-file /opt/dynachat/.env up -d --build app-blue
+    docker compose --env-file /opt/virtualagent/.env up -d --build app-blue
     # Wait for healthy
     for i in $(seq 1 900); do
-        S=$(docker inspect --format='{{.State.Health.Status}}' dynachat-app-blue 2>/dev/null || echo missing)
+        S=$(docker inspect --format='{{.State.Health.Status}}' virtualagent-app-blue 2>/dev/null || echo missing)
         [ "$S" = "healthy" ] && break
         sleep 2
     done
@@ -121,17 +112,17 @@ if [ "$ACTIVE" = "blue" ]; then INACTIVE=green; else INACTIVE=blue; fi
 echo "[$(date -Iseconds)] active=$ACTIVE, deploying to $INACTIVE"
 
 # Build + start inactive
-docker compose --env-file /opt/dynachat/.env up -d --build --no-deps "app-$INACTIVE"
+docker compose --env-file /opt/virtualagent/.env up -d --build --no-deps "app-$INACTIVE"
 
 # Wait for inactive to be healthy (90s budget)
 for i in $(seq 1 900); do
-    S=$(docker inspect --format='{{.State.Health.Status}}' "dynachat-app-$INACTIVE" 2>/dev/null || echo missing)
+    S=$(docker inspect --format='{{.State.Health.Status}}' "virtualagent-app-$INACTIVE" 2>/dev/null || echo missing)
     [ "$S" = "healthy" ] && break
     sleep 2
 done
 if [ "$S" != "healthy" ]; then
     echo "[$(date -Iseconds)] app-$INACTIVE unhealthy ($S) — aborting, keeping $ACTIVE live"
-    docker compose --env-file /opt/dynachat/.env stop "app-$INACTIVE" || true
+    docker compose --env-file /opt/virtualagent/.env stop "app-$INACTIVE" || true
     exit 1
 fi
 
@@ -144,5 +135,5 @@ swap_caddy_upstream "app-$INACTIVE:8000"
 sleep 5
 
 # Stop old
-docker compose --env-file /opt/dynachat/.env stop "app-$ACTIVE" || true
+docker compose --env-file /opt/virtualagent/.env stop "app-$ACTIVE" || true
 echo "[$(date -Iseconds)] deploy complete: $ACTIVE -> $INACTIVE"

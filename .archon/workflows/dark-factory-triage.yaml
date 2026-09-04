@@ -25,12 +25,12 @@ nodes:
       # calendar day. Excess issues are labeled `factory:rate-limited`
       # and skipped until the next UTC day, when stale labels are
       # removed and the excess is re-evaluated. The repository owner
-      # (coleam00) is exempt.
+      # (alaehassouni-a11y) is exempt.
       #
       # Enforcement happens in three steps before the actual batch
       # fetch, so the classifier never sees rate-limited issues.
 
-      OWNER="coleam00"
+      OWNER="alaehassouni-a11y"
       DAILY_CAP=3
       TODAY_UTC=$(date -u '+%Y-%m-%d')
 

@@ -30,12 +30,12 @@ Fixes #
 - [ ]
 - [ ]
 
-## Agent-browser regression
+## End-to-end journey
 
-<!-- Every PR must pass the full end-to-end happy path via agent-browser.
+<!-- Every PR must pass the full API-level journey against a running service.
      Confirm you ran it locally (or note that the validator will run it). -->
 
-- [ ] Full happy-path regression passes (sign-in → new conversation → ask question → streaming response → citations → citation modal with embedded player)
+- [ ] python harness/ci.py passes (static → unit → the API journey in FACTORY_RULES.md §4 → holdout → mutations)
 
 ## Dependencies
 
@@ -57,4 +57,4 @@ Fixes #
 
 - [ ] No protected files modified
 - [ ] PR size is within 500 lines (additions + deletions)
-- [ ] No weakening of authentication, authorization, or the 25 msg/day rate limit
+- [ ] No weakening of the session token check or the 100 turns/client/day cap

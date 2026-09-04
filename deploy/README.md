@@ -1,136 +1,64 @@
 # Deploy
 
-Production deployment via Docker Compose. Runs Caddy (TLS + reverse proxy) and Postgres (pgvector).
+Production deployment via Docker Compose. Runs Caddy (TLS + reverse proxy) in front of two identical copies of the Virtual Agent service — `app-blue` and `app-green` — and swaps between them for zero-downtime deploys. There is no database, no migration step and no frontend build: the service is a single FastAPI process, its only client is the iOS app, and the wiki it answers from ships inside the image.
 
 ## First-time setup on a new VPS
 
 1. Install Docker: https://docs.docker.com/engine/install/
-2. Clone this repo to `/opt/dynachat/` (owned by a dedicated `dynachat` user, `chmod 700`)
-3. Copy `.env.example` to `.env`, fill in real values (`chmod 600`)
-4. Point DNS A record for your subdomain at the VPS public IP
-5. `cd deploy && docker compose up -d`
-6. Caddy auto-provisions a Let's Encrypt cert on first request
+2. Clone this repo to `/opt/virtualagent/app/` (owned by a dedicated `virtualagent` user, `chmod 700` on `/opt/virtualagent/`)
+3. Copy `deploy/.env.example` to `/opt/virtualagent/.env`, fill in real values (`chmod 600`)
+4. Edit `deploy/Caddyfile`: replace `agent.example.com` with your hostname and `ops@example.com` with the address Let's Encrypt should notify
+5. Point the DNS A record for that hostname at the VPS public IP
+6. `cd /opt/virtualagent/app/deploy && cp upstream.conf.example upstream.conf && docker compose --env-file /opt/virtualagent/.env up -d caddy app-blue`
+7. Caddy auto-provisions a Let's Encrypt cert on first request
+8. Copy `deploy/deploy.sh` to `/opt/virtualagent/deploy.sh` and schedule it (systemd timer or cron). From then on every commit to `main` is a blue/green swap; nobody runs `docker compose` by hand
 
 ## Files
 
-- `docker-compose.yml` - Caddy + Postgres services
-- `Caddyfile` - reverse-proxy config (TLS + subdomain routing)
-- `.env.example` - secret template (committed); real `.env` is gitignored
+- `docker-compose.yml` - Caddy + the two app colours
+- `Dockerfile` - the service image: Python 3.11, `uv`-installed dependencies, the backend, and a copy of `virtualagent/resources/`
+- `Caddyfile` - reverse-proxy config (TLS + hostname routing); imports `upstream.conf`
+- `upstream.conf.example` - shape of the one-line file that names the live colour. The real `upstream.conf` is written by `deploy.sh` and is gitignored
+- `deploy.sh` - blue/green deploy script. This copy is the source of truth; the live `/opt/virtualagent/deploy.sh` is mirrored by hand
+- `.env.example` - secret template (committed); real `.env` lives outside the checkout and is gitignored
 
 ## Ports
 
 - `80` / `443` (public) - Caddy
-- `127.0.0.1:5433` (loopback only) - Postgres
+
+Nothing else is published. The app containers are reachable only from Caddy over the internal Docker network.
 
 ## Environment variables
 
-The app container reads these from `/opt/dynachat/.env` via docker-compose:
+The app container reads these from `/opt/virtualagent/.env` via docker-compose:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `OPENROUTER_API_KEY` | **yes** | OpenRouter embeddings + chat |
-| `SUPADATA_API_KEY` | prod only | YouTube transcript fetch |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | **yes** | Postgres credentials used by both the `postgres` service and the app's `DATABASE_URL` |
-| `JWT_SECRET` | **yes** (auth) | 32+ random bytes used to sign session-cookie JWTs. Generate with `openssl rand -hex 32`. Rotating this value invalidates all live sessions |
-| `ADMIN_USER_EMAIL` | optional | Email of the single admin user (case-insensitive match). When unset, every `/api/admin/*` endpoint returns 403. Match MUST equal the email the admin registered with |
+| `OPENROUTER_API_KEY` | **yes** | OpenRouter chat completions and the embeddings that index the wiki. The service refuses to start without it |
+| `BRAVE_SEARCH_API_KEY` | optional | Brave Search key for the web fallback. When unset the agent answers from the wiki only and says it does not know otherwise |
+| `CHAT_MODEL` | optional | OpenRouter chat model. Defaults to `anthropic/claude-sonnet-4.6`; set it to canary a new model on the inactive colour |
+| `CORS_ORIGINS` | optional | Comma-separated browser origins allowed to call the API. The iOS app needs none; leave empty |
 
-The app's `DATABASE_URL` is assembled from the `POSTGRES_*` values inside
-`docker-compose.yml` — you do **not** set it directly in `.env`. It points at
-the in-compose `postgres` service by DNS name.
+`WIKI_RESOURCES_DIR` is **not** set in `.env`. `docker-compose.yml` pins it to
+`/app/virtualagent/resources`, the copy of the wiki that `Dockerfile` bakes into
+the image, so the code and the knowledge it answers from always deploy together.
 
 Minimal `.env` for a fresh deploy:
 
 ```
 OPENROUTER_API_KEY=sk-or-...
-SUPADATA_API_KEY=...
-POSTGRES_USER=dynachat
-POSTGRES_PASSWORD=<random>
-POSTGRES_DB=dynachat
-JWT_SECRET=<openssl rand -hex 32>
-ADMIN_USER_EMAIL=admin@yourdomain.com
+BRAVE_SEARCH_API_KEY=...
 ```
+
+## The wiki deploys like code
+
+The agent's knowledge is every `.md` and `.txt` file under `virtualagent/resources/`
+at the repo root. The image copies that folder in at build time and the service
+indexes it at startup, so adding a document to the folder and merging to `main`
+*is* a deploy: `deploy.sh` builds a new image on the inactive colour, waits for
+its healthcheck (which only passes once the wiki is indexed), and flips Caddy.
+There is no upload path, no sync job and no volume to keep in step.
 
 ## Secret hygiene
 
 The real `.env` lives ONLY on the deploy host, in a directory owned by a non-factory user with mode 600. It is never committed, never shared via chat, and never readable by the Dark Factory workflow user.
-
-## Automated YouTube channel sync
-
-`deploy/sync-channel.sh` runs a one-shot YouTube sync inside the active app
-container by `docker exec`-ing into the color named in `upstream.conf`. Two
-systemd units in `deploy/systemd/` drive it on a schedule:
-
-- `dynachat-channel-sync.service` — one-shot, calls `sync-channel.sh`
-- `dynachat-channel-sync.timer`   — daily at 00:00 UTC, with a 30-min jitter
-
-### Install on a host
-
-```bash
-# As root, from the repo checkout (typically /opt/dynachat/app/)
-install -m 0644 deploy/systemd/dynachat-channel-sync.service /etc/systemd/system/
-install -m 0644 deploy/systemd/dynachat-channel-sync.timer   /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now dynachat-channel-sync.timer
-
-# Verify
-systemctl list-timers dynachat-channel-sync.timer
-journalctl -u dynachat-channel-sync.service -n 20
-```
-
-### Trigger a sync manually
-
-```bash
-# Full sync (newest first, stops once Supadata is exhausted)
-systemctl start dynachat-channel-sync.service
-
-# Or run the wrapper directly with custom args (e.g. cap to 20 newest videos)
-/opt/dynachat/app/deploy/sync-channel.sh --limit 20
-```
-
-The wrapper is idempotent — already-ingested videos are skipped by
-`youtube_video_id` unless `--force` is passed (used to backfill new chunk
-schemas; see `routes/channels.py`'s `force` flag).
-
-## SQLite → Postgres cutover runbook
-
-When migrating an existing production deployment from SQLite to Postgres:
-
-### Prerequisites
-- Postgres must be running and healthy (`postgres` service up)
-- `DATABASE_URL` must be set correctly in `.env`
-- `alembic.ini` must be present in the app container
-
-### Step 1 — Snapshot SQLite (before cutover)
-```bash
-# On the host, inside the app container or at app/backend/data/
-./scripts/dump_sqlite.sh
-# Or manually:
-cp /app/data/chat.db /app/data/chat.db.$(date +%s).bak
-```
-
-### Step 2 — Run Alembic migrations (first deploy with new build)
-The app runs `alembic upgrade head` automatically on startup.
-Verify it succeeded:
-```bash
-docker compose exec app-blue alembic --config /app/backend/alembic.ini current
-# Should show: 0001 (or latest revision)
-```
-
-### Step 3 — Copy data from SQLite to Postgres (one-time)
-```bash
-# Run the migration script inside the app container
-docker compose exec app-blue python -m backend.scripts.migrate_sqlite_to_pg /app/data/chat.db
-# The script will prompt for DATABASE_URL (use the same one from .env)
-```
-
-### Step 4 — Verify
-```bash
-# Check row counts match between snapshot and Postgres
-docker compose exec postgres psql -U ${POSTGRES_USER} -d ${POSTGRES_DB} -c 'SELECT count(*) from videos'
-docker compose exec postgres psql -U ${POSTGRES_USER} -d ${POSTGRES_DB} -c 'SELECT count(*) from chunks'
-```
-
-### Step 5 — Restart app (ensures clean pool state)
-```bash
-docker compose restart app-blue app-green
-```

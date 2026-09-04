@@ -1,13 +1,14 @@
 name: dark-factory-validate-pr
 description: |
   Use when: Dark Factory orchestrator wants to validate a PR labeled `factory:needs-review`
-            against its linked issue, run static + unit + E2E (agent-browser) checks under
+            against its linked issue, run static + unit + E2E (API journey) checks under
             the holdout pattern, optionally self-fix issues in a fresh-context session,
             re-validate, and render a final verdict.
   Triggers: Orchestrator dispatch for `factory:needs-review`, or manual "validate PR #N".
-  Does: Fetches PR + linked issue + base-branch governance -> starts the app on dynamic
-        ports -> runs static checks + unit tests + four parallel HOLDOUT reviewers
-        (behavioral, agent-browser E2E, security, code review) -> synthesizes a verdict.
+  Does: Fetches PR + linked issue + base-branch governance -> starts the Virtual Agent
+        service on a dynamic port against stub providers -> runs static checks + unit
+        tests + four parallel HOLDOUT reviewers (behavioral, API E2E, security, code
+        review) -> synthesizes a verdict.
         If request_changes, runs a fresh-context fix pass, then a second full validation
         pass (all reviewers re-run on the updated diff). Always tears down the app,
         then applies the final verdict (approve / request_changes / reject).
@@ -43,7 +44,8 @@ description: |
 
   4. Fresh context + empty tool lists on every AI reviewer node. The behavioral
      static reviewer has `allowed_tools: []`. The E2E reviewer has `[Bash]` (only
-     to drive agent-browser) and is explicitly forbidden from reading source.
+     to drive the running service with curl) and is explicitly forbidden from
+     reading source.
 
   5. Command-file explicit prohibitions — every AI node loads a .md command file
      whose leading section enumerates what must not be read (plans, commit
@@ -54,10 +56,11 @@ description: |
      The fixer's reasoning never leaks into the second validation pass — pass-2
      reviewers see only the updated diff and the running app.
 
-  Prerequisite: `agent-browser` must be installed and available on PATH. On the
-  dark-factory VPS this is installed globally. Locally, `npm i -g agent-browser`
-  then `agent-browser install` to fetch Chrome for Testing. See the
-  `.claude/skills/agent-browser/SKILL.md` skill for CLI reference.
+  Prerequisite: `uv` on PATH (the service runs under `app/backend/.venv`) and a
+  `python` that can run `harness/serve.py`. The service's only client is an iOS
+  app that cannot run on the factory's machines, so the E2E journey is the API
+  contract in `docs/API.md`, driven exactly as the app drives it. `serve.py`
+  starts stub providers, so no secrets, no network and no env file are needed.
 
 provider: claude
 model: sonnet
@@ -226,27 +229,18 @@ nodes:
     timeout: 60000
 
   # ═══════════════════════════════════════════════════════════════
-  # PHASE 2: INSTALL DEPS + START THE APP FOR E2E
+  # PHASE 2: INSTALL DEPS + START THE SERVICE FOR E2E
   # ═══════════════════════════════════════════════════════════════
-  # We need the app running before the E2E reviewer can drive it.
+  # We need the service running before the E2E reviewer can drive it.
   # Dynamic port allocation so parallel workflow runs don't collide.
 
   - id: allocate-ports
     bash: |
       set -euo pipefail
-      # Backend MUST use port 8000. The Vite dev server proxy in
-      # vite.config.ts is hardcoded to forward /api/* to localhost:8000.
-      # The frontend code (api.ts) uses relative `/api/...` paths that
-      # go through this proxy. Using a dynamic backend port breaks all
-      # browser-based validation because the proxy target doesn't match.
-      BACKEND_PORT=8000
-      if (echo >/dev/tcp/127.0.0.1/$BACKEND_PORT) 2>/dev/null; then
-        echo "ERROR: port $BACKEND_PORT already in use - cannot start backend" >&2
-        exit 1
-      fi
-
-      # Frontend port can be dynamic - agent-browser reads it from the
-      # artifact file and connects directly.
+      # The service is one FastAPI process and its only client is the iOS
+      # app, so nothing on this machine hardcodes its port. Pick a free one
+      # so parallel workflow runs never collide; the E2E reviewer reads it
+      # from the artifact file.
       find_free_port() {
         local start=$1 end=$2
         for port in $(seq $start $end); do
@@ -256,11 +250,10 @@ nodes:
         done
         echo "ERROR: no free port in range $start-$end" >&2; return 1
       }
-      FRONTEND_PORT=$(find_free_port 15100 15999)
+      BACKEND_PORT=$(find_free_port 15100 15999)
 
-      echo "$BACKEND_PORT"  > "$ARTIFACTS_DIR/.backend-port"
-      echo "$FRONTEND_PORT" > "$ARTIFACTS_DIR/.frontend-port"
-      echo "Allocated backend=$BACKEND_PORT frontend=$FRONTEND_PORT"
+      echo "$BACKEND_PORT" > "$ARTIFACTS_DIR/.backend-port"
+      echo "Allocated backend=$BACKEND_PORT"
     depends_on: [checkout-pr]
     timeout: 10000
 
@@ -270,9 +263,6 @@ nodes:
       export PATH="$HOME/.local/bin:$PATH"
       echo "=== Backend deps (uv sync) ==="
       (cd app/backend && uv sync --all-extras 2>&1 | tail -10)
-      echo ""
-      echo "=== Frontend deps (bun install) ==="
-      (cd app/frontend && bun install 2>&1 | tail -10)
       echo ""
       # Warm the mypy cache. Cold mypy on this backend exceeds the 2-min
       # bash-node default timeout and SIGTERMs static-checks-backend-p1;
@@ -285,8 +275,8 @@ nodes:
       (cd app/backend && uv run mypy . 2>&1 | tail -3) || true
     depends_on: [checkout-pr]
     # Bash nodes ignore idle_timeout — only `timeout` is honored (default
-    # 120000ms). Must set explicitly: uv sync + bun install + cold mypy
-    # together can run 3-5 minutes on a fresh worktree.
+    # 120000ms). Must set explicitly: uv sync + cold mypy together can
+    # run 3-5 minutes on a fresh worktree.
     timeout: 600000
 
   - id: start-app
@@ -294,118 +284,60 @@ nodes:
       set -euo pipefail
       export PATH="$HOME/.local/bin:$PATH"
 
-      # Load the validation-sandbox env file. The backend now hard-requires
-      # DATABASE_URL (Postgres) and other secrets at import time; without this
-      # sourcing step, uvicorn crashes before the health check ever responds
-      # and the E2E reviewer never gets a running app to drive. That used to
-      # silently degrade to `e2e_status: "not_e2e_testable"` and slip past the
-      # synthesizer — apply-verdict now has a deterministic backstop, but the
-      # real fix is making start-app actually work.
-      #
-      # The env file lives OUTSIDE the repo (it contains secrets and must not
-      # be committed). Path is overridable via DARK_FACTORY_VALIDATION_ENV;
-      # defaults to /opt/dark-factory/validation.env on the VPS. Any VPS where
-      # this workflow runs must have that file populated with at minimum:
-      #   DATABASE_URL, OPENROUTER_API_KEY, JWT_SECRET, SUPADATA_API_KEY,
-      #   YOUTUBE_CHANNEL_ID
-      # Use a DEDICATED validation database URL — not production — so E2E runs
-      # can't pollute real user data.
-      VALIDATION_ENV="${DARK_FACTORY_VALIDATION_ENV:-/opt/dark-factory/validation.env}"
-      if [ -f "$VALIDATION_ENV" ]; then
-        echo "Loading validation env from $VALIDATION_ENV"
-        set -a
-        # shellcheck disable=SC1090
-        . "$VALIDATION_ENV"
-        set +a
-      else
-        echo "WARN: validation env file not found at $VALIDATION_ENV" >&2
-        echo "WARN: backend will likely fail to boot without DATABASE_URL and friends" >&2
-      fi
+      # `harness/serve.py` is the ONLY way the factory starts the service for
+      # validation. It boots stub providers (an OpenAI-shaped model and a
+      # Brave-shaped search) on a free port, points the service at them and
+      # at `harness/fixtures/wiki` through the same environment variables
+      # production uses, then runs uvicorn as a child that dies with it. No
+      # secrets, no network, no env file: the whole journey in docs/API.md
+      # runs against stubs, so this node needs nothing from the VPS. It
+      # refuses loudly (APP_START_REFUSED) when `uv` is missing.
+      PYTHON=$(command -v python || command -v python3)
 
-      # Fail fast with a clear message if required vars are missing. Better
-      # to die here with a diagnosable error than to watch uvicorn crash at
-      # import and confuse the E2E reviewer into `not_e2e_testable`.
-      REQUIRED_VARS=(DATABASE_URL OPENROUTER_API_KEY JWT_SECRET SUPADATA_API_KEY YOUTUBE_CHANNEL_ID)
-      MISSING=()
-      for v in "${REQUIRED_VARS[@]}"; do
-        if [ -z "${!v:-}" ]; then MISSING+=("$v"); fi
-      done
-      if [ ${#MISSING[@]} -gt 0 ]; then
-        echo "ERROR: required env vars missing for validation sandbox: ${MISSING[*]}" >&2
-        echo "ERROR: populate $VALIDATION_ENV (outside the repo) and retry." >&2
-        exit 1
-      fi
-
-      # Normal path: ports come from the find-free-ports node via artifacts.
-      # Demo/manual path: if the port files are missing (e.g. someone ran this
-      # node in isolation), fall back to sensible defaults and write them so
-      # downstream nodes that read the files still work.
+      # Normal path: the port comes from allocate-ports via artifacts.
+      # Demo/manual path: if the port file is missing (someone ran this node
+      # in isolation), allocate one the same way and write it so downstream
+      # nodes that read the file still work.
       if [ -f "$ARTIFACTS_DIR/.backend-port" ]; then
         BACKEND_PORT=$(cat "$ARTIFACTS_DIR/.backend-port")
       else
-        BACKEND_PORT=8000
+        find_free_port() {
+          local start=$1 end=$2
+          for port in $(seq $start $end); do
+            if ! (echo >/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
+              echo $port; return 0
+            fi
+          done
+          echo "ERROR: no free port in range $start-$end" >&2; return 1
+        }
+        BACKEND_PORT=$(find_free_port 15100 15999)
         echo "$BACKEND_PORT" > "$ARTIFACTS_DIR/.backend-port"
-        echo "WARN: .backend-port missing, defaulting to $BACKEND_PORT" >&2
-      fi
-      if [ -f "$ARTIFACTS_DIR/.frontend-port" ]; then
-        FRONTEND_PORT=$(cat "$ARTIFACTS_DIR/.frontend-port")
-      else
-        FRONTEND_PORT=15100
-        echo "$FRONTEND_PORT" > "$ARTIFACTS_DIR/.frontend-port"
-        echo "WARN: .frontend-port missing, defaulting to $FRONTEND_PORT" >&2
+        echo "WARN: .backend-port missing, allocated $BACKEND_PORT" >&2
       fi
 
       mkdir -p "$ARTIFACTS_DIR/app-logs"
 
-      # Backend: uvicorn on dynamic port, logs to artifacts
-      (
-        cd app
-        nohup uv --project backend run uvicorn backend.main:app \
-          --host 127.0.0.1 --port "$BACKEND_PORT" \
-          > "$ARTIFACTS_DIR/app-logs/backend.log" 2>&1 &
-        echo $! > "$ARTIFACTS_DIR/.backend-pid"
-      )
+      # Service + stub providers, in the background, logs to artifacts.
+      nohup "$PYTHON" harness/serve.py --port "$BACKEND_PORT" > "$ARTIFACTS_DIR/app-logs/backend.log" 2>&1 &
+      echo $! > "$ARTIFACTS_DIR/.backend-pid"
 
-      # Frontend: vite dev server on dynamic port.
-      # We use --port and --strictPort to force the assigned port.
-      # API_BASE env var is set so the frontend calls the right backend
-      # (bypassing the known-broken vite proxy — see CLAUDE.md footguns).
-      (
-        cd app/frontend
-        VITE_API_BASE="http://127.0.0.1:$BACKEND_PORT" \
-        nohup bun run dev -- --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort \
-          > "$ARTIFACTS_DIR/app-logs/frontend.log" 2>&1 &
-        echo $! > "$ARTIFACTS_DIR/.frontend-pid"
-      )
-
-      # Wait for both to be healthy
+      # Wait for health. The service answers GET /api/health with
+      # {"status":"ok",...} once the wiki has loaded (boot can take a
+      # while on a cold worktree: uv resolves the venv first).
       echo "Waiting for backend on :$BACKEND_PORT ..."
-      for i in $(seq 1 60); do
-        if curl -sf "http://127.0.0.1:$BACKEND_PORT/api/health" > /dev/null 2>&1; then
+      for i in $(seq 1 90); do
+        if curl -sf "http://127.0.0.1:$BACKEND_PORT/api/health" 2>/dev/null | grep -qE '"status": ?"ok"'; then
           echo "backend up after ${i}s"; break
         fi
-        if [ $i -eq 60 ]; then
-          echo "ERROR: backend failed to start in 60s" >&2
+        if [ $i -eq 90 ]; then
+          echo "ERROR: backend failed to start in 90s" >&2
           tail -50 "$ARTIFACTS_DIR/app-logs/backend.log" >&2
           exit 1
         fi
         sleep 1
       done
 
-      echo "Waiting for frontend on :$FRONTEND_PORT ..."
-      for i in $(seq 1 60); do
-        if curl -sf "http://127.0.0.1:$FRONTEND_PORT" > /dev/null 2>&1; then
-          echo "frontend up after ${i}s"; break
-        fi
-        if [ $i -eq 60 ]; then
-          echo "ERROR: frontend failed to start in 60s" >&2
-          tail -50 "$ARTIFACTS_DIR/app-logs/frontend.log" >&2
-          exit 1
-        fi
-        sleep 1
-      done
-
-      echo "APP_STARTED backend=$BACKEND_PORT frontend=$FRONTEND_PORT"
+      echo "APP_STARTED backend=$BACKEND_PORT"
     depends_on: [install-deps, allocate-ports]
     idle_timeout: 180000
 
@@ -534,7 +466,6 @@ nodes:
     depends_on: [fetch-pr, fetch-linked-issue, start-app]
     context: fresh
     allowed_tools: [Bash]
-    skills: [agent-browser]
     output_format:
       type: object
       properties:
@@ -807,7 +738,6 @@ nodes:
     depends_on: [fix-issues, fetch-pr, fetch-linked-issue, start-app]
     context: fresh
     allowed_tools: [Bash]
-    skills: [agent-browser]
     output_format:
       type: object
       properties:
