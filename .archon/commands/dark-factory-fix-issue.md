@@ -1,5 +1,5 @@
 ---
-description: Implement a fix from investigation artifact for the Dark Factory — code changes, Python + Bun deps, light validation, commit (no PR).
+description: Implement a fix from investigation artifact for the Dark Factory — code changes, uv-managed Python deps, light validation, commit (no PR).
 argument-hint: (reads $ARTIFACTS_DIR/investigation.md, $ARTIFACTS_DIR/plan.md)
 ---
 
@@ -15,7 +15,7 @@ Execute the implementation plan from the investigation/plan artifact:
 
 1. Load and validate the artifact
 2. Ensure git state is correct
-3. Install dependencies (Python backend + Bun frontend, tailored to DynaChat)
+3. Install dependencies (the uv-managed Python service; the iOS app has none)
 4. Implement the changes exactly as specified
 5. Run a light inline validation (the heavy validation is done by `dark-factory-validate`)
 6. Commit changes
@@ -72,11 +72,11 @@ Archon runs this workflow inside a worktree created by the orchestrator. Use tha
 
 ---
 
-## Phase 4: DEPENDENCIES — DynaChat-specific
+## Phase 4: DEPENDENCIES
 
-DynaChat has a Python backend (uv-managed) and a Bun frontend. Follow `CLAUDE.md` §Running the App exactly.
+The Virtual Agent is one uv-managed Python service. The iOS app has no third-party dependencies and no toolchain on this machine. Follow `CLAUDE.md` §Running the Service exactly.
 
-### 4.1 Backend deps
+### 4.1 Service deps
 
 ```bash
 # uv reads app/backend/pyproject.toml + uv.lock, creates .venv, installs runtime + dev deps.
@@ -85,22 +85,12 @@ DynaChat has a Python backend (uv-managed) and a Bun frontend. Follow `CLAUDE.md
 
 If `pyproject.toml` was modified by the plan, re-run the sync — uv will update `uv.lock` automatically.
 
-### 4.2 Frontend deps
-
-```bash
-cd app/frontend
-bun install
-```
-
-If `package.json` was modified by the plan, re-run `bun install`.
-
-### 4.3 Failure handling
+### 4.2 Failure handling
 
 If install fails, STOP and report the error. Do not proceed to implementation with missing dependencies — you will waste iterations on spurious failures.
 
 **PHASE_4_CHECKPOINT:**
-- [ ] Backend venv populated
-- [ ] Frontend node_modules populated
+- [ ] Service venv populated
 
 ---
 
@@ -113,26 +103,25 @@ For each step in the Implementation Plan:
 1. Read the target file (use the Read tool)
 2. Make the change exactly as specified
 3. After any Python edit, spot-check with `python -m py_compile {file}` to catch syntax errors fast
-4. After any TypeScript edit, you can defer the full type-check to Phase 6
+4. After any Swift edit, re-read the whole file slowly: there is no compiler on this machine (`CLAUDE.md` §Testing)
 
 ### 5.2 Implementation rules
 
 **DO:**
 - Follow artifact steps in order
 - Match existing code style per `CLAUDE.md` §Code Conventions
-- Keep all SQL in `app/backend/db/repository.py`
-- Keep all fetch calls in `app/frontend/src/lib/api.ts`
-- Use async everywhere on the backend (CLAUDE.md §Python (backend))
-- Use function components + hooks on the frontend (CLAUDE.md §TypeScript (frontend))
+- Keep the language set in `languages.py`, the cap in `rate_limit.py`, the token check in `auth.py`, the wire format in `routes/sessions.py`
+- Keep all app networking in `AgentAPI.swift` and every app string, in all four languages, in `Phrases.swift`
+- Use async everywhere in the service (CLAUDE.md §Python (service))
+- Fake the providers at the boundary in tests, never the network (CLAUDE.md §Testing)
 - Add tests for bug fixes (regression test) and features (per FACTORY_RULES.md §3)
-- Use portable SQL only — no SQLite-specific functions (CLAUDE.md §Database)
 
 **DON'T:**
 - Refactor unrelated code or "improve" things outside the plan (CLAUDE.md §Dos and Don'ts)
-- Add a new LLM provider, embedding model, or vector database
-- Add a state-management library, ORM, or other framework
+- Add an inference provider, change the embedding model, add or remove a language, or let the web answer before the wiki
+- Add a database, an ORM, accounts, a third-party Swift package, or a second client
 - Modify `MISSION.md`, `FACTORY_RULES.md`, `CLAUDE.md`, `.github/`, `.env*`, or `.archon/config.yaml`
-- Change the SSE streaming format in `useStreamingResponse.ts` or the route that produces it
+- Change the SSE format in `routes/sessions.py` or `docs/API.md` without changing `Models.swift` and `SSEParser.swift` in the same PR
 
 ### 5.3 Track deviations
 
@@ -164,25 +153,24 @@ cd app && uv --project backend run python -c "import backend.main"
 
 If that import fails, read the traceback and fix the root cause.
 
-### 6.2 Frontend sanity
+### 6.2 App sanity
 
-If frontend files were touched:
+If Swift files were touched:
 
 ```bash
-cd app/frontend && bun run tsc --noEmit
+cd app/backend && uv run python ../../harness/static_ios.py
 ```
 
-Type errors here must be fixed before commit.
+That checks the manifests and that every Swift file balances its braces. It is not a compile; there is no Swift toolchain here, and the PR body must carry a `## Manual verification` section for the person with a Mac.
 
 ### 6.3 What NOT to do here
 
 - Don't run ruff/mypy/pytest — `dark-factory-validate` owns those.
-- Don't run the full biome/vitest suite — `dark-factory-validate` owns those.
 - This is a tight loop to catch "did I just break imports" before we commit.
 
 **PHASE_6_CHECKPOINT:**
 - [ ] Backend imports cleanly (if touched)
-- [ ] Frontend type-checks (if touched)
+- [ ] App manifests pass (if touched)
 
 ---
 
@@ -276,7 +264,7 @@ Write to `$ARTIFACTS_DIR/implementation.md`:
 | Check | Result |
 |-------|--------|
 | Backend import | pass |
-| Frontend tsc | pass |
+| iOS manifests | pass |
 
 Full validation deferred to `dark-factory-validate` node.
 ```
@@ -308,7 +296,7 @@ Proceeding to validation (`dark-factory-validate`).
 ## Success Criteria
 
 - **PLAN_EXECUTED**: All investigation steps completed
-- **SANITY_PASSED**: Backend imports, frontend tsc clean (if applicable)
+- **SANITY_PASSED**: Service imports, app manifests clean (if applicable)
 - **CHANGES_COMMITTED**: All changes committed with `Fixes #N` in the body
 - **IMPLEMENTATION_ARTIFACT**: `$ARTIFACTS_DIR/implementation.md` written
 - **READY_FOR_VALIDATE**: Workflow continues to `dark-factory-validate`

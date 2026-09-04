@@ -51,8 +51,9 @@ Fixes #
 ## Governance / protected files
 
 <!-- Confirm the PR does NOT modify any of: MISSION.md, FACTORY_RULES.md,
-     CLAUDE.md, .github/**, Dockerfile*, docker-compose*, deploy/**,
-     .env*, .archon/config.yaml, rate-limit code, or auth middleware.
+     CLAUDE.md, docs/virtualagent.prd.md, .github/**, deploy/**, harness/**,
+     .factory/**, .env*, .archon/config.yaml, auth.py, rate_limit.py, or the
+     language-set definitions in languages.py.
      Any PR touching these is auto-rejected. -->
 
 - [ ] No protected files modified

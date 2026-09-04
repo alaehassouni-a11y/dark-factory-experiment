@@ -44,13 +44,13 @@ Scan the diff for:
 
 ### 2. Injection and Command Execution
 - Shell command injection: user input passed to `subprocess`, `os.system`, `os.popen`, template literals in backticks that reach `exec`, etc., without escaping.
-- SQL injection: string-concatenated SQL. DynaChat's rule (per CLAUDE.md) is that all SQL lives in `db/repository.py` using parameterized queries — flag any SQL outside that file or any concatenation.
+- Path traversal into the wiki: the service reads `WIKI_RESOURCES_DIR` from disk. Any user-controlled value (turn text, `client_id`, `language_hint`) reaching `open()`, `Path()` or the index reader is `critical`.
 - Path traversal: user-controlled paths reaching `open()`, `Path()`, `fs.readFile`, etc., without validation.
-- Template injection: user input reaching Jinja2 / f-string-eval / React `dangerouslySetInnerHTML`.
+- Prompt-template injection: user text spliced into the system prompt (`agent/prompts.py`) instead of being sent as a user message.
 - Prompt injection via unsanitized user input reaching LLM calls that also have tool use — only flag if the diff introduces new tool-use surface; otherwise note as medium.
 
 ### 3. Dependency Additions
-- Any new entry in `app/backend/pyproject.toml` `[dependencies]` or `app/frontend/package.json` — flag with name, version, and whether the PR body's "Dependency justification" section explains it.
+- Any new entry in `app/backend/pyproject.toml` `[dependencies]`, or any package dependency added to `app/ios/project.yml` (the app takes none) — flag with name, version, and whether the PR body's "Dependency justification" section explains it.
 - New dependencies added WITHOUT a justification in the PR body → `high` severity.
 - Dependencies that look typosquatted (near-misses of popular package names) → `critical`.
 - Dependencies from unknown sources (not PyPI / npm registry) → `critical`.
@@ -58,7 +58,7 @@ Scan the diff for:
 ### 4. Permission / Auth Weakening
 - Changes to CORS configuration widening origins
 - Auth middleware removed, bypassed, or made conditional
-- Rate-limit code (the 25-msg cap per CLAUDE.md hard invariants) modified
+- The session token check (`auth.py`, `Depends(get_current_session)` on a session route) or the turn cap (`rate_limit.py`, 100 per client per day) modified
 - New public API surfaces added without auth
 - File operations widened (`0o777`, absolute paths outside the app root)
 
@@ -68,7 +68,9 @@ Does the diff touch ANY of these? (Check `diff --git a/...` headers.)
 - `MISSION.md`
 - `CLAUDE.md`
 - `.github/**` (issue templates, PR template, workflows)
-- `Dockerfile`, `docker-compose.yml`, any deployment config
+- `deploy/**`, any `Dockerfile` or `docker-compose*.yml`
+- `harness/**`, `.factory/**`, `scripts/factory-stop.sh`
+- `app/backend/auth.py`, `app/backend/rate_limit.py`, `app/backend/llm/openrouter.py`, and the `SUPPORTED_LANGUAGES` / `LANGUAGE_NAMES` / `VOICE_LOCALES` definitions in `app/backend/languages.py`
 - `.env*` files
 - `.archon/config.yaml`, `.archon/workflows/**`, `.archon/commands/**`
 
@@ -102,7 +104,7 @@ Return structured JSON matching the schema enforced by the workflow node:
 
 ## Verdict Rules
 
-- **fail** if ANY of: governance files modified, critical or high security issue found, new deps without justification, unknown-source packages, secret detected, or DynaChat hard invariants (rate-limit, RAG pipeline config) touched.
+- **fail** if ANY of: governance files modified, critical or high security issue found, new deps without justification, unknown-source packages, secret detected, or a MISSION hard invariant touched (the language set, wiki before web, the declared source, the token check, the cap, the provider).
 - **pass** if only low-severity findings or none at all. Medium findings go into `security_issues` for the synthesizer to weigh but do not flip verdict to fail on their own.
 
 ---

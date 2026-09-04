@@ -44,20 +44,20 @@ Hardcoded API keys, tokens, OAuth client secrets, DB connection strings with cre
 
 ### 2. Injection and Command Execution
 - Shell injection: unsanitized input reaching `subprocess` / `os.system` / template literals hitting `exec`
-- SQL injection: string-concatenated SQL (DynaChat rule: all SQL lives in `db/repository.py`, parameterized)
+- Path traversal into the wiki: user-controlled values reaching `open()` / `Path()` / the index reader (`critical`)
 - Path traversal: user-controlled paths in `open()` / `Path()` without validation
-- Template injection: user input in Jinja2 / f-string eval / React `dangerouslySetInnerHTML`
+- Prompt-template injection: user text spliced into the system prompt instead of sent as a user message
 - Prompt injection: new tool-use surface that mixes untrusted input with tools
 
 ### 3. Dependency Additions
-- Any new entry in `app/backend/pyproject.toml` `[dependencies]` or `app/frontend/package.json`
+- Any new entry in `app/backend/pyproject.toml` `[dependencies]` or a package dependency in `app/ios/project.yml` (the app takes none)
 - Flag with name, version, and whether PR body has a Dependency Justification section
 - No justification → `high`. Typosquatted names → `critical`. Unknown sources → `critical`.
 
 ### 4. Permission / Auth Weakening
 - CORS origins widened
 - Auth middleware removed / bypassed / conditional
-- Rate-limit code (25-msg cap per CLAUDE.md) modified
+- The session token check (`auth.py`) or the turn cap (`rate_limit.py`, 100 per client per day) modified
 - New public API surfaces without auth
 - Wider file operations (`0o777`, absolute paths outside app root)
 
@@ -65,7 +65,8 @@ Hardcoded API keys, tokens, OAuth client secrets, DB connection strings with cre
 Check diff `diff --git a/...` headers for ANY of:
 - `FACTORY_RULES.md`, `MISSION.md`, `CLAUDE.md`
 - `.github/**`
-- `Dockerfile`, `docker-compose.yml`, deployment configs
+- `deploy/**`, `harness/**`, `.factory/**`, `scripts/factory-stop.sh`, any `Dockerfile` or `docker-compose*.yml`
+- `app/backend/auth.py`, `app/backend/rate_limit.py`, `app/backend/llm/openrouter.py`, the language-set definitions in `app/backend/languages.py`
 - `.env*` files
 - `.archon/config.yaml`, `.archon/workflows/**`, `.archon/commands/**`
 
@@ -92,7 +93,7 @@ Return structured JSON (same schema as pass 1):
 
 ## Verdict Rules
 
-- **fail** if ANY of: governance modified, critical/high issue, unjustified new deps, unknown-source packages, secret detected, DynaChat hard invariants touched.
+- **fail** if ANY of: governance modified, critical/high issue, unjustified new deps, unknown-source packages, secret detected, a MISSION hard invariant touched.
 - **pass** if only low-severity findings. Medium findings are recorded but don't flip the verdict alone.
 
 ---

@@ -6,9 +6,11 @@ description: |
             re-validate, and render a final verdict.
   Triggers: Orchestrator dispatch for `factory:needs-review`, or manual "validate PR #N".
   Does: Fetches PR + linked issue + base-branch governance -> starts the Virtual Agent
-        service on a dynamic port against stub providers -> runs static checks + unit
+        service on a dynamic port against stub providers -> runs THE GATE
+        (harness/ci.py: static, unit, the section 4 journey, the holdout, the mutation
+        set, then harness/ratchet.py against the floors) + static checks + unit
         tests + four parallel HOLDOUT reviewers (behavioral, API E2E, security, code
-        review) -> synthesizes a verdict.
+        review) -> synthesizes a verdict, which bash overrides if the gate was red.
         If request_changes, runs a fresh-context fix pass, then a second full validation
         pass (all reviewers re-run on the updated diff). Always tears down the app,
         then applies the final verdict (approve / request_changes / reject).
@@ -342,6 +344,40 @@ nodes:
     idle_timeout: 180000
 
   # ═══════════════════════════════════════════════════════════════
+  # PHASE 3a: THE GATE (deterministic, the third code gate)
+  # ═══════════════════════════════════════════════════════════════
+  # harness/ci.py is the ladder: static, unit, the FACTORY_RULES §4 journey
+  # against a live service (its own port, its own stub providers), the
+  # holdout the builder cannot read, and the mutation set. Then
+  # harness/ratchet.py asserts every observed count is at least its floor in
+  # .factory/locks/floor.json and that the PR did not lower a floor relative
+  # to origin/main. The full log is an artifact; only marker lines are
+  # echoed, because apply-verdict greps THIS node's output for GATE_OK and
+  # RATCHET_OK and overrides any approve without them. Until 2026-09-04 the
+  # holdout and the mutation set ran only when a person ran them.
+
+  - id: gate
+    bash: |
+      set +e
+      export PATH="$HOME/.local/bin:$PATH"
+      PYTHON=$(command -v python || command -v python3)
+      "$PYTHON" harness/ci.py > "$ARTIFACTS_DIR/gate.log" 2>&1
+      GATE_RC=$?
+      "$PYTHON" harness/ratchet.py "$ARTIFACTS_DIR/gate.log" --base origin/main >> "$ARTIFACTS_DIR/gate.log" 2>&1
+      RATCHET_RC=$?
+      grep -E '^(HARNESS_START|STATIC_|UNIT_|APP_STARTED|E2E_|HOLDOUT_|MUTATION|GATE_|RATCHET_|  (ok|CAUGHT|ESCAPED|NOT_INJECTED|RATCHET_FAIL|E2E_FAIL|HOLDOUT_FAIL) )' "$ARTIFACTS_DIR/gate.log"
+      if [ $GATE_RC -ne 0 ] || [ $RATCHET_RC -ne 0 ]; then
+        echo "--- tail of gate.log ---"
+        tail -60 "$ARTIFACTS_DIR/gate.log"
+      fi
+      echo "GATE_NODE_DONE gate_rc=$GATE_RC ratchet_rc=$RATCHET_RC"
+      [ $GATE_RC -eq 0 ] && [ $RATCHET_RC -eq 0 ]
+    depends_on: [install-deps, checkout-pr]
+    # The mutation set re-runs static + unit + holdout per defect; eight
+    # defects is the better part of half an hour on the VPS.
+    timeout: 2400000
+
+  # ═══════════════════════════════════════════════════════════════
   # PHASE 3: PASS-1 STATIC CHECKS + UNIT TESTS (deterministic, parallel)
   # ═══════════════════════════════════════════════════════════════
 
@@ -373,27 +409,6 @@ nodes:
     # occasionally runs >2 minutes — give it real headroom.
     timeout: 300000
 
-  - id: static-checks-frontend-p1
-    bash: |
-      set +e
-      cd app/frontend
-      echo "=== tsc --noEmit ==="
-      bun run tsc --noEmit 2>&1 | tail -40
-      TSC=$?
-      echo ""
-      echo "=== biome check ==="
-      bun x biome check src 2>&1 | tail -30
-      BIOME=$?
-      echo ""
-      echo "RESULT: tsc=$([ $TSC -eq 0 ] && echo PASS || echo FAIL) biome=$([ $BIOME -eq 0 ] && echo PASS || echo FAIL)"
-      [ $TSC -eq 0 ] && [ $BIOME -eq 0 ]
-    depends_on: [install-deps]
-    # Bash nodes honor `timeout`, not `idle_timeout`. tsc on a cold worktree
-    # plus biome check routinely clears 2 min — the default bash timeout
-    # would SIGTERM mid-run and leave `| tail -30`'s buffer unflushed, so
-    # Archon captures empty stdout and the synthesizer reads infra failure.
-    timeout: 180000
-
   - id: run-tests-backend-p1
     bash: |
       set +e
@@ -409,21 +424,6 @@ nodes:
     depends_on: [install-deps]
     # Bash nodes honor `timeout`, not `idle_timeout`. pytest -xvs against
     # the real Postgres can exceed 2 min once the suite has >100 tests.
-    timeout: 300000
-
-  - id: run-tests-frontend-p1
-    bash: |
-      set +e
-      cd app/frontend
-      if ! grep -q '"test"' package.json 2>/dev/null; then
-        echo "TEST_RESULT_FRONTEND=SKIPPED (no test script in package.json)"
-        exit 0
-      fi
-      bun run test 2>&1 | tail -60
-      echo ""
-      echo "TEST_RESULT_FRONTEND=$([ $? -eq 0 ] && echo PASS || echo FAIL)"
-    depends_on: [install-deps]
-    # Bash nodes honor `timeout`, not `idle_timeout`.
     timeout: 300000
 
   # ═══════════════════════════════════════════════════════════════
@@ -459,8 +459,9 @@ nodes:
         - confidence
         - reasoning
 
-  # E2E behavioral: drives the running app via agent-browser.
-  # This is the "real-world holdout" — observable behavior, not source inspection.
+  # E2E behavioral: drives the running service through the API with curl, exactly
+  # as the iOS app drives it. This is the "real-world holdout" — observable
+  # behavior, not source inspection.
   - id: behavioral-e2e-p1
     command: dark-factory-behavioral-e2e
     depends_on: [fetch-pr, fetch-linked-issue, start-app]
@@ -550,10 +551,9 @@ nodes:
       # static checks / tests / E2E never ran at all.
       - checkout-pr
       - start-app
+      - gate
       - static-checks-backend-p1
-      - static-checks-frontend-p1
       - run-tests-backend-p1
-      - run-tests-frontend-p1
       - behavioral-validation-p1
       - behavioral-e2e-p1
       - security-check-p1
@@ -620,8 +620,10 @@ nodes:
   # ═══════════════════════════════════════════════════════════════
   # Re-runs ALL reviewers on the updated diff. Each one with fresh context —
   # they don't know a fix happened, they only see the code as it now stands
-  # and the app as it now runs (uvicorn --reload and vite HMR picked up the
-  # fixer's changes without us having to restart the app).
+  # and the service as it now runs. harness/serve.py runs uvicorn WITHOUT
+  # --reload, so the process started for pass 1 would keep serving the
+  # pre-fix code; restart-app-p2 replaces it before the pass-2 E2E reviewer
+  # runs.
 
   - id: fetch-diff-p2
     bash: |
@@ -633,6 +635,56 @@ nodes:
       gh pr diff "$PR_NUMBER" | head -3000
     depends_on: [fix-issues]
     timeout: 30000
+
+  - id: restart-app-p2
+    bash: |
+      set -euo pipefail
+      export PATH="$HOME/.local/bin:$PATH"
+      # Kill the pass-1 service (serve.py forwards the signal to uvicorn and
+      # shuts the stubs down with it), then start it again on the same port so
+      # the pass-2 E2E reviewer drives the fixer's code, not pass 1's.
+      if [ -f "$ARTIFACTS_DIR/.backend-pid" ]; then
+        kill "$(cat "$ARTIFACTS_DIR/.backend-pid")" 2>/dev/null || true
+        sleep 3
+      fi
+      PYTHON=$(command -v python || command -v python3)
+      BACKEND_PORT=$(cat "$ARTIFACTS_DIR/.backend-port")
+      nohup "$PYTHON" harness/serve.py --port "$BACKEND_PORT" > "$ARTIFACTS_DIR/app-logs/backend-p2.log" 2>&1 &
+      echo $! > "$ARTIFACTS_DIR/.backend-pid"
+      for i in $(seq 1 90); do
+        if curl -sf "http://127.0.0.1:$BACKEND_PORT/api/health" 2>/dev/null | grep -qE '"status": ?"ok"'; then
+          echo "backend up after ${i}s"; break
+        fi
+        if [ $i -eq 90 ]; then
+          echo "ERROR: backend failed to restart in 90s" >&2
+          tail -50 "$ARTIFACTS_DIR/app-logs/backend-p2.log" >&2
+          exit 1
+        fi
+        sleep 1
+      done
+      echo "APP_RESTARTED backend=$BACKEND_PORT"
+    depends_on: [fix-issues]
+    timeout: 180000
+
+  - id: gate-p2
+    bash: |
+      set +e
+      export PATH="$HOME/.local/bin:$PATH"
+      # Same gate, on the fixer's code. apply-verdict reads this one when pass 2 ran.
+      PYTHON=$(command -v python || command -v python3)
+      "$PYTHON" harness/ci.py > "$ARTIFACTS_DIR/gate-p2.log" 2>&1
+      GATE_RC=$?
+      "$PYTHON" harness/ratchet.py "$ARTIFACTS_DIR/gate-p2.log" --base origin/main >> "$ARTIFACTS_DIR/gate-p2.log" 2>&1
+      RATCHET_RC=$?
+      grep -E '^(HARNESS_START|STATIC_|UNIT_|APP_STARTED|E2E_|HOLDOUT_|MUTATION|GATE_|RATCHET_|  (ok|CAUGHT|ESCAPED|NOT_INJECTED|RATCHET_FAIL|E2E_FAIL|HOLDOUT_FAIL) )' "$ARTIFACTS_DIR/gate-p2.log"
+      if [ $GATE_RC -ne 0 ] || [ $RATCHET_RC -ne 0 ]; then
+        echo "--- tail of gate-p2.log ---"
+        tail -60 "$ARTIFACTS_DIR/gate-p2.log"
+      fi
+      echo "GATE_NODE_DONE gate_rc=$GATE_RC ratchet_rc=$RATCHET_RC"
+      [ $GATE_RC -eq 0 ] && [ $RATCHET_RC -eq 0 ]
+    depends_on: [fix-issues]
+    timeout: 2400000
 
   - id: static-checks-backend-p2
     bash: |
@@ -660,22 +712,6 @@ nodes:
     # cached. 5 min is generous headroom.
     timeout: 300000
 
-  - id: static-checks-frontend-p2
-    bash: |
-      set +e
-      cd app/frontend
-      echo "=== tsc --noEmit ==="
-      bun run tsc --noEmit 2>&1 | tail -40; TSC=$?
-      echo ""
-      echo "=== biome check ==="
-      bun x biome check src 2>&1 | tail -30; BIOME=$?
-      echo ""
-      echo "RESULT: tsc=$([ $TSC -eq 0 ] && echo PASS || echo FAIL) biome=$([ $BIOME -eq 0 ] && echo PASS || echo FAIL)"
-      [ $TSC -eq 0 ] && [ $BIOME -eq 0 ]
-    depends_on: [fix-issues]
-    # Bash nodes honor `timeout`, not `idle_timeout`.
-    timeout: 180000
-
   - id: run-tests-backend-p2
     bash: |
       set +e
@@ -687,20 +723,6 @@ nodes:
       uv run pytest tests -xvs 2>&1 | tail -80
       echo ""
       echo "TEST_RESULT_BACKEND=$([ $? -eq 0 ] && echo PASS || echo FAIL)"
-    depends_on: [fix-issues]
-    # Bash nodes honor `timeout`, not `idle_timeout`.
-    timeout: 300000
-
-  - id: run-tests-frontend-p2
-    bash: |
-      set +e
-      cd app/frontend
-      if ! grep -q '"test"' package.json 2>/dev/null; then
-        echo "TEST_RESULT_FRONTEND=SKIPPED"; exit 0
-      fi
-      bun run test 2>&1 | tail -60
-      echo ""
-      echo "TEST_RESULT_FRONTEND=$([ $? -eq 0 ] && echo PASS || echo FAIL)"
     depends_on: [fix-issues]
     # Bash nodes honor `timeout`, not `idle_timeout`.
     timeout: 300000
@@ -735,7 +757,7 @@ nodes:
 
   - id: behavioral-e2e-p2
     command: dark-factory-behavioral-e2e
-    depends_on: [fix-issues, fetch-pr, fetch-linked-issue, start-app]
+    depends_on: [fix-issues, fetch-pr, fetch-linked-issue, restart-app-p2]
     context: fresh
     allowed_tools: [Bash]
     output_format:
@@ -815,10 +837,10 @@ nodes:
     # in sync.
     when: "$synthesize-verdict-pass-1.output.verdict == 'request_changes'"
     depends_on:
+      - restart-app-p2
+      - gate-p2
       - static-checks-backend-p2
-      - static-checks-frontend-p2
       - run-tests-backend-p2
-      - run-tests-frontend-p2
       - behavioral-validation-p2
       - behavioral-e2e-p2
       - security-check-p2
@@ -873,12 +895,6 @@ nodes:
         BACKEND_PID=$(cat "$ARTIFACTS_DIR/.backend-pid")
         kill "$BACKEND_PID" 2>/dev/null && echo "killed backend PID $BACKEND_PID" || echo "backend already dead"
       fi
-      if [ -f "$ARTIFACTS_DIR/.frontend-pid" ]; then
-        FRONTEND_PID=$(cat "$ARTIFACTS_DIR/.frontend-pid")
-        kill "$FRONTEND_PID" 2>/dev/null && echo "killed frontend PID $FRONTEND_PID" || echo "frontend already dead"
-      fi
-      # Best-effort close any lingering agent-browser session
-      agent-browser close 2>/dev/null || true
       echo "TEARDOWN_COMPLETE"
     depends_on: [synthesize-verdict-pass-1, synthesize-verdict-pass-2]
     trigger_rule: all_done
@@ -961,8 +977,8 @@ nodes:
       # was empirically ignored at least once — the AI returned
       # e2e_status: "not_e2e_testable" and verdict: "approve" while the
       # backend had crashed at import with `RuntimeError: DATABASE_URL is
-      # not set`. An auto-merged PR that was never actually driven through
-      # agent-browser is exactly the failure mode FACTORY_RULES §4 exists
+      # not set`. An auto-merged PR that was never actually driven through the
+      # API journey is exactly the failure mode FACTORY_RULES §4 exists
       # to prevent, so rule-0 needs a non-AI enforcement layer.
       #
       # This block is that layer: deterministic bash reads start-app's
@@ -983,11 +999,50 @@ nodes:
         echo "INFRA_BACKSTOP_OVERRIDE: start-app did not emit APP_STARTED but synthesizer rendered approve — overriding to reject+escalate." >&2
         DECISION="reject"
         SHOULD_ESCALATE="true"
-        ESCALATION_REASON="Deterministic infrastructure backstop fired: start-app output lacked the APP_STARTED marker, so no agent-browser E2E regression could have actually run against a live app. The synthesize-verdict node rendered an approve verdict anyway (rule 0 of dark-factory-synthesize-verdict.md was not honored). A human must investigate both the infrastructure failure (check \$ARTIFACTS_DIR/app-logs/backend.log and the validation.env file) and the synthesizer's failure to catch it."
-        SUMMARY="Infrastructure backstop override: start-app never reached APP_STARTED, so the agent-browser E2E regression required by FACTORY_RULES §3.3 and §4 could not have run. Auto-approve blocked."
+        ESCALATION_REASON="Deterministic infrastructure backstop fired: start-app output lacked the APP_STARTED marker, so no end-to-end journey could have actually run against a live service. The synthesize-verdict node rendered an approve verdict anyway (rule 0 of dark-factory-synthesize-verdict.md was not honored). A human must investigate both the infrastructure failure (check \$ARTIFACTS_DIR/app-logs/backend.log; harness/serve.py names what it refused on) and the synthesizer's failure to catch it."
+        SUMMARY="Infrastructure backstop override: start-app never reached APP_STARTED, so the end-to-end journey required by FACTORY_RULES §3 and §4 could not have run. Auto-approve blocked."
         ISSUES=$(printf '%s\n' \
-          "- **critical** [e2e]: start-app node did not emit APP_STARTED — backend or frontend failed to boot and the mandatory agent-browser regression never ran." \
+          "- **critical** [e2e]: start-app node did not emit APP_STARTED — the service failed to boot and the mandatory end-to-end journey never ran." \
           "- **critical** [e2e]: synthesize-verdict rendered approve despite the missing APP_STARTED marker — review why rule 0 of the synthesize-verdict command did not fire.")
+      fi
+      # ──────────────────────────────────────────────────────────────────
+
+      # ──────────────────────────────────────────────────────────────────
+      # THE GATE BACKSTOP - same shape, one more marker.
+      # ──────────────────────────────────────────────────────────────────
+      # The `gate` node (or `gate-p2` when a fix pass ran) is harness/ci.py plus
+      # harness/ratchet.py: static, unit, the journey, the holdout, the mutation
+      # set, the floors. Its marker lines are its output. No GATE_OK and
+      # RATCHET_OK in there means the build is not good, whatever a reviewer
+      # concluded from the diff - so any approve becomes reject+escalate here,
+      # in bash, before a single gh call.
+      cat > "$ARTIFACTS_DIR/.gate-output" <<'__GATE_OUTPUT_EOF__'
+      $gate.output
+      __GATE_OUTPUT_EOF__
+      cat > "$ARTIFACTS_DIR/.gate-p2-output" <<'__GATE_P2_OUTPUT_EOF__'
+      $gate-p2.output
+      __GATE_P2_OUTPUT_EOF__
+      if [ "$PASS_LABEL" = "pass-2" ]; then
+        GATE_FILE="$ARTIFACTS_DIR/.gate-p2-output"
+      else
+        GATE_FILE="$ARTIFACTS_DIR/.gate-output"
+      fi
+      if grep -qE '^\s*GATE_OK mode=full' "$GATE_FILE" && grep -qE '^\s*RATCHET_OK' "$GATE_FILE"; then
+        GATE_GREEN="true"
+      else
+        GATE_GREEN="false"
+      fi
+      echo "GATE_BACKSTOP: gate_green=$GATE_GREEN pass=$PASS_LABEL decision=$DECISION"
+
+      if [ "$DECISION" = "approve" ] && [ "$GATE_GREEN" != "true" ]; then
+        echo "GATE_BACKSTOP_OVERRIDE: the gate did not report GATE_OK and RATCHET_OK but the synthesizer rendered approve - overriding to reject+escalate." >&2
+        DECISION="reject"
+        SHOULD_ESCALATE="true"
+        ESCALATION_REASON="Deterministic gate backstop fired: harness/ci.py plus harness/ratchet.py did not end in GATE_OK and RATCHET_OK for ${PASS_LABEL}, so at least one of static, unit, the FACTORY_RULES §4 journey, the holdout, the mutation set or a ratchet floor is red. The synthesizer rendered approve anyway. Read \$ARTIFACTS_DIR/gate.log (or gate-p2.log) for the rung that failed."
+        SUMMARY="Gate backstop override: the harness did not report GATE_OK and RATCHET_OK, so the quality gates in FACTORY_RULES §3 (1-6) are not all green. Auto-approve blocked."
+        ISSUES=$(printf '%s\n' \
+          "- **critical** [e2e]: python harness/ci.py did not end in GATE_OK, or harness/ratchet.py did not end in RATCHET_OK - see gate.log in the run artifacts." \
+          "- **critical** [e2e]: synthesize-verdict rendered approve despite a red gate - review why the gate node's output was not weighed.")
       fi
       # ──────────────────────────────────────────────────────────────────
 
@@ -1027,8 +1082,9 @@ nodes:
             "${SUMMARY}" \
             "" \
             "All quality gates passed:" \
+            "- Gate: python harness/ci.py GATE_OK + harness/ratchet.py RATCHET_OK (static, unit, journey, holdout, mutations, floors)" \
             "- Behavioral (static): solves_issue=yes" \
-            "- Behavioral (E2E via agent-browser): solves_issue=yes" \
+            "- Behavioral (E2E through the API): solves_issue=yes" \
             "- Security: pass (no governance files modified)" \
             "- Static checks: pass" \
             "- Tests: pass or legitimately skipped" \
