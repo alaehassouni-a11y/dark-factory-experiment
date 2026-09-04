@@ -10,8 +10,11 @@ What it does, in order:
   2. Points the service at the stubs and at `harness/fixtures/wiki` through the same
      environment variables production uses, so nothing in the service knows it is being
      tested.
-  3. Writes the stub port to `harness/.run/stub-port` so `e2e.py` can ask the stubs how
-     many times each provider was called.
+  3. Writes the stub port to `harness/.run/stub-port-<service port>` so `e2e.py` can ask
+     the stubs how many times each provider was called. Keyed by the service's port
+     because two of these run at once in the validate-pr workflow (the gate's own, and
+     the one the E2E reviewer drives): a single shared file would hand the gate the
+     reviewer's stub, whose call counts the reviewer is changing mid-assertion.
   4. Runs uvicorn as a child that DIES WITH THIS PROCESS. On Windows that is a Job Object
      with kill-on-close; on POSIX a SIGTERM handler. Without it, `appproc.py` terminating
      this script would orphan uvicorn, which would keep the port and poison the next lap.
@@ -116,7 +119,7 @@ def main() -> int:
     stub_port = _free_port()
     stubs = serve_stubs(stub_port)
     RUN_DIR.mkdir(exist_ok=True)
-    (RUN_DIR / "stub-port").write_text(str(stub_port), encoding="utf-8")
+    (RUN_DIR / f"stub-port-{args.port}").write_text(str(stub_port), encoding="utf-8")
     print(f"STUBS_STARTED port={stub_port}", flush=True)
 
     env = dict(os.environ)

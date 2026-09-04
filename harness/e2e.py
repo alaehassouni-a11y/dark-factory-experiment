@@ -21,11 +21,12 @@ import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-STUB_PORT_FILE = HERE / ".run" / "stub-port"
+RUN_DIR = HERE / ".run"
 
 
-def _stub_calls() -> dict[str, int]:
-    port = STUB_PORT_FILE.read_text(encoding="utf-8").strip()
+def _stub_calls(app) -> dict[str, int]:
+    # serve.py keys the file by the service's port: two journeys can run at once.
+    port = (RUN_DIR / f"stub-port-{app.port}").read_text(encoding="utf-8").strip()
     with urllib.request.urlopen(f"http://127.0.0.1:{port}/_calls", timeout=10) as r:
         return json.loads(r.read().decode("utf-8"))
 
@@ -94,7 +95,7 @@ def run_e2e(app) -> int | None:
 
     # 5-7. A wiki-covered French question: French, spoken sentence by sentence, from the
     #      wiki, and the web NEVER touched (MISSION invariant 2).
-    before = _stub_calls()["web_search"]
+    before = _stub_calls(app)["web_search"]
     status, frames = turn(session, "Quels sont vos horaires d'ouverture ?")
     langs = _named(frames, "language")
     check("the French question is detected as French with a French voice",
@@ -109,7 +110,7 @@ def run_e2e(app) -> int | None:
           f"names={names} tokens={tokens!r}")
     turns = _named(frames, "turn")
     sources = _named(frames, "sources")
-    after = _stub_calls()["web_search"]
+    after = _stub_calls(app)["web_search"]
     check("the answer comes from the wiki, names a document, and the web was not searched",
           turns and turns[-1].get("source") == "wiki" and sources and sources[0]
           and all(s.get("kind") == "wiki" and s.get("location") for s in sources[0])
@@ -120,7 +121,7 @@ def run_e2e(app) -> int | None:
     turns = _named(frames, "turn")
     sources = _named(frames, "sources")
     langs = _named(frames, "language")
-    web_after = _stub_calls()["web_search"]
+    web_after = _stub_calls(app)["web_search"]
     check("an uncovered German question is answered from the web, in German, with a URL",
           status == 200 and langs and langs[0].get("language") == "de"
           and turns and turns[-1].get("source") == "web"

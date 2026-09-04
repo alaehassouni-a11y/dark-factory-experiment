@@ -67,6 +67,11 @@ def main() -> int:
     if failed:
         print(f"STATIC_FAILED checks={','.join(failed)}", flush=True)
         return 1
+    # ci.py swallows a passing rung's output, so the count the ratchet needs cannot
+    # come from the log. Leave it in the one place a rung may: harness/.run.
+    run_dir = ROOT / "harness" / ".run"
+    run_dir.mkdir(exist_ok=True)
+    (run_dir / "static-checks").write_text(str(ran), encoding="utf-8")
     print(f"STATIC_OK checks={ran}", flush=True)
     return 0
 
