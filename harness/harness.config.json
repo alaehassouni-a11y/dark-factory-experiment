@@ -5,7 +5,7 @@
 
   "static": "python harness/static.py",
   "unit": "python harness/unit.py",
-  "unit_count_pattern": "UNIT_PASSED tests=(\d+)",
+  "unit_count_pattern": "UNIT_PASSED tests=(\\d+)",
 
   "http": {
     "start": "python harness/serve.py --port {port}",
