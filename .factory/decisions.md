@@ -88,8 +88,14 @@ the provider may not change.
 
 ## D-005 · The app is verified by a person
 
-**Status:** open · **Raised:** 2026-09-04 · **Blocks:** nothing today; every app issue
-eventually
+**Status:** open, deferred by the owner 2026-09-05 · **Raised:** 2026-09-04 · **Blocks:** nothing
+today; every app issue eventually
+
+**2026-09-05:** the owner chose to keep work on the desktop for now: no Mac, no macOS CI
+runner, no simulator. The service is developed and tested from a PC through the API and
+the harness; the app stays in the repo as written. When this is picked up again, the
+cheapest path is a GitHub Actions `macos-latest` workflow that runs `xcodegen generate`,
+builds for the simulator and runs `VirtualAgentTests`; the voice half stays a device check.
 
 The iOS app was written on a machine with no Xcode, no XcodeGen and no iOS SDK. It has
 never been generated, compiled, or run, and its unit tests have never executed
