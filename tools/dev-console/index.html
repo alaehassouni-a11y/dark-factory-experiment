@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Virtual Agent – developer console</title>
+<link rel="icon" href="data:,">
 <!--
   A DEVELOPER CONSOLE for the service, not a client of the product. MISSION.md forbids any
   client other than the iOS app; this page exists so a person at a desk can exercise the
@@ -66,12 +67,14 @@
     </select>
   </label>
   <label><input id="speak" type="checkbox" checked> speak sentences aloud</label>
+  <button id="testvoice" title="Speak one sentence so you can check the sound">🔊 Test voice</button>
   <button id="new" class="primary">New session</button>
   <span id="lang" title="language of the session"></span>
 </header>
 
 <main>
   <div id="status"></div>
+  <div id="speech" class="hint" style="margin:0 0 .6rem"></div>
   <div id="transcript"></div>
 </main>
 
@@ -110,16 +113,66 @@
   };
 
   // ---- speech output: the browser speaks each sentence in the locale the service names
-  const speak = (text, locale) => {
-    if (!speakEl.checked || !('speechSynthesis' in window)) return;
+  //
+  // Two things silence a page like this, and both are the browser's doing, not the
+  // service's: (1) no browser will speak before the person has clicked or typed on the
+  // page, so a greeting spoken at load is dropped; (2) a sentence in a language with no
+  // installed voice has nothing to speak with (Windows: Settings > Time & Language >
+  // Speech > Add voices). The speech line below says which one is happening.
+  const speechEl = $('speech');
+  const synth = 'speechSynthesis' in window ? window.speechSynthesis : null;
+  let unlocked = false;               // has the page had a user gesture yet?
+  let pendingGreeting = null;         // greeting we could not speak before the first gesture
+  let lastSpeechError = '';
+  const voices = () => synth ? synth.getVoices() : [];
+  const voiceFor = (lang) => {
+    const list = voices();
+    const norm = (l) => (l || '').replace('_', '-').toLowerCase();
+    return list.find(v => norm(v.lang) === norm(lang)) || list.find(v => norm(v.lang).split('-')[0] === norm(lang).split('-')[0]) || null;
+  };
+  const describeSpeech = () => {
+    if (!synth) { speechEl.textContent = 'Speech output: not available in this browser.'; return; }
+    const list = voices();
+    const langs = [...new Set(list.map(v => v.lang.replace('_', '-')))].sort();
+    const missing = Object.entries(LOCALES).filter(([, loc]) => !voiceFor(loc)).map(([code]) => code);
+    let s = `Speech output: ${list.length} voice${list.length === 1 ? '' : 's'} installed` + (langs.length ? ` (${langs.join(', ')})` : '') + '.';
+    if (missing.length) s += ` No voice for ${missing.join(', ')}: those sentences will be silent or spoken by the default voice. Windows: Settings > Time & Language > Speech > Add voices.`;
+    if (!unlocked) s += ' Audio is locked until you click or type on the page (a browser rule); the greeting will be spoken then.';
+    if (lastSpeechError) s += ` Last error: ${lastSpeechError}.`;
+    if (!speakEl.checked) s += ' Speaking is switched off.';
+    speechEl.textContent = s;
+  };
+  const speak = (text, locale, { isGreeting = false } = {}) => {
+    if (!speakEl.checked || !synth) return;
+    if (!unlocked) { if (isGreeting) pendingGreeting = { text, locale }; describeSpeech(); return; }
     const u = new SpeechSynthesisUtterance(text);
     u.lang = locale || voiceLocale;
-    const voice = speechSynthesis.getVoices().find(v => v.lang === u.lang) ||
-                  speechSynthesis.getVoices().find(v => v.lang.startsWith(u.lang.split('-')[0]));
+    const voice = voiceFor(u.lang);
     if (voice) u.voice = voice;
-    speechSynthesis.speak(u);
+    u.onerror = (ev) => { lastSpeechError = `${ev.error} while speaking "${text.slice(0, 40)}"`; describeSpeech(); };
+    if (synth.paused) synth.resume();
+    synth.speak(u);
   };
-  if ('speechSynthesis' in window) speechSynthesis.getVoices(); // warm the voice list
+  const unlock = () => {
+    if (unlocked) return;
+    unlocked = true;
+    if (pendingGreeting) { const g = pendingGreeting; pendingGreeting = null; speak(g.text, g.locale); }
+    describeSpeech();
+  };
+  ['pointerdown', 'keydown'].forEach(ev => document.addEventListener(ev, unlock, { capture: true }));
+  if (synth) { synth.getVoices(); synth.addEventListener('voiceschanged', describeSpeech); }
+  speakEl.addEventListener('change', describeSpeech);
+  $('testvoice').addEventListener('click', () => {
+    unlock();
+    const loc = LOCALES[language] || 'en-US';
+    const line = { 'fr-FR': 'Bonjour, ceci est un test de la voix.', 'de-DE': 'Hallo, dies ist ein Sprachtest.', 'ar-SA': 'مرحبا، هذا اختبار للصوت.' }[loc] || 'Hello, this is a voice test.';
+    if (!synth) { setStatus('This browser has no speech synthesis.', true); return; }
+    if (!speakEl.checked) { setStatus('Tick "speak sentences aloud" first.', true); return; }
+    lastSpeechError = '';
+    speak(line, loc);
+    setStatus(`Speaking a test sentence in ${loc}${voiceFor(loc) ? ' with ' + voiceFor(loc).name : ' (no matching voice installed; the default voice will try)'}. If you hear nothing, check the system volume and the browser tab is not muted.`);
+  });
+  describeSpeech();
 
   // ---- transcript rendering
   const addMessage = (role, text) => {
@@ -168,7 +221,7 @@
   };
 
   async function newSession() {
-    speechSynthesis && speechSynthesis.cancel();
+    synth && synth.cancel();
     transcript.innerHTML = '';
     session = null;
     setLanguage(null);
@@ -185,7 +238,7 @@
       const g = data.greeting;
       const el = addMessage('agent', g.text);
       addMeta(el, { kind: 'question', source: 'none' }, []);
-      speak(g.text, g.voice_locale);
+      speak(g.text, g.voice_locale, { isGreeting: true });
       setStatus(`Session ${session.id} open.`);
     } catch (e) {
       setStatus(`Cannot reach ${base()} — is the service running, and is this page's origin in CORS_ORIGINS? (${e.message})`, true);
@@ -198,7 +251,7 @@
     if (!text || busy) return;
     if (!session) { await newSession(); if (!session) return; }
     busy = true; sendBtn.disabled = true;
-    speechSynthesis && speechSynthesis.cancel();
+    synth && synth.cancel();
     addMessage('client', text);
     const reply = addMessage('agent', '');
     reply.classList.add('streaming');
@@ -260,19 +313,32 @@
   // ---- speech input: the browser listens in the session's voice locale
   let recog = null;
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!Recognition) { micBtn.disabled = true; micBtn.title = 'Speech recognition needs Chrome or Edge'; }
+  if (!Recognition) {
+    micBtn.disabled = true;
+    micBtn.title = 'Speech recognition is not available in this browser; Chrome and Edge have it';
+    setStatus('Speech recognition is not available in this browser. Chrome and Edge have it; typing works everywhere.');
+  }
+  const RECOGNITION_ERRORS = {
+    'not-allowed': 'the browser refused the microphone. Allow it for this site (the icon in the address bar) and try again',
+    'service-not-allowed': 'the browser refused the speech service',
+    'audio-capture': 'no microphone was found',
+    'no-speech': 'nothing was heard; speak within a few seconds of pressing the button',
+    'network': 'speech recognition needs the browser\'s online service (Chrome and Edge send audio to their servers); check the connection',
+    'language-not-supported': 'the browser cannot recognise this language',
+    'aborted': 'listening was stopped',
+  };
   micBtn.addEventListener('click', () => {
     if (recog) { recog.stop(); return; }
     recog = new Recognition();
     recog.lang = voiceLocale;
     recog.interimResults = true;
-    micBtn.classList.add('listening'); setStatus(`Listening in ${recog.lang}…`);
+    micBtn.classList.add('listening'); setStatus(`Listening in ${recog.lang}… speak now, then pause.`);
     recog.onresult = (ev) => {
       const t = Array.from(ev.results).map(r => r[0].transcript).join(' ');
       textEl.value = t;
       if (ev.results[ev.results.length - 1].isFinal) { recog.stop(); }
     };
-    recog.onerror = (ev) => setStatus(`Microphone: ${ev.error}`, true);
+    recog.onerror = (ev) => setStatus(`Microphone: ${RECOGNITION_ERRORS[ev.error] || ev.error}.`, true);
     recog.onend = () => {
       micBtn.classList.remove('listening'); recog = null;
       const heard = textEl.value.trim();
