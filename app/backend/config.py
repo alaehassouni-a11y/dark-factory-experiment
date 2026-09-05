@@ -40,7 +40,11 @@ WIKI_TOP_K: int = 5
 WIKI_POLL_SECONDS: int = int(os.environ.get("WIKI_POLL_SECONDS", "10"))
 # The confidence decision between wiki and web (MISSION hard invariant 2 is the ORDER;
 # these are the tolerances the order is judged with, and they are judgement values).
-WIKI_MIN_TERM_COVERAGE: float = 0.5
+# Coverage is measured over the question's content STEMS (wiki/index.py): function words,
+# question words and one- or two-letter tokens do not count, and inflections meet. 0.4
+# rather than 0.5 because the bar is not the last line of defence: excerpts that pass it
+# without answering are declined by the model and the turn falls through to the web.
+WIKI_MIN_TERM_COVERAGE: float = 0.4
 WIKI_MIN_SIMILARITY: float = 0.45
 
 # --- web fallback -------------------------------------------------------------------------

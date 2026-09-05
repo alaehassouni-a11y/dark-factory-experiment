@@ -25,14 +25,64 @@ from pathlib import Path
 from typing import Protocol
 
 from backend.config import WIKI_MIN_SIMILARITY, WIKI_MIN_TERM_COVERAGE, WIKI_TOP_K
-from backend.languages import _FUNCTION_WORDS, tokenize
+from backend.languages import _ARABIC, _FUNCTION_WORDS, tokenize
 
 logger = logging.getLogger(__name__)
 
 WIKI_EXTENSIONS = (".md", ".txt")
 CHUNK_TARGET_CHARS = 700
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
-_STOPWORDS: frozenset[str] = frozenset().union(*_FUNCTION_WORDS.values())
+
+# Words a question is made of and a document is not. Function words come from the
+# language module (it needs them to tell the languages apart); these are the question
+# words on top, which detection deliberately leaves alone because they mark a question,
+# not a topic: "combien de temps dure la garantie" is about the guarantee.
+_QUESTION_WORDS: frozenset[str] = frozenset(
+    """combien quel quelle quels quelles lequel laquelle lesquels lesquelles pourquoi comment
+    quand encore aussi svp
+    how what which when where why much many long often whether
+    wie was welche welcher welches wann wo warum wieviel viel viele lange oft
+    كم ما ماذا كيف متى اين أين هل لماذا""".split()
+)
+_STOPWORDS: frozenset[str] = frozenset().union(*_FUNCTION_WORDS.values()) | _QUESTION_WORDS
+
+# Conservative stemming, one rule set for the three Latin-script languages and one for
+# Arabic, so that "garantie" and "garantis", "produit" and "produits", "hour" and
+# "hours", "Öffnungszeit" and "Öffnungszeiten", "ساعة" and "ساعات" meet in the index.
+# Cut a long word to its first six letters, drop a plural s/x from a shorter one; strip the
+# article and the common suffixes from Arabic. A false merge costs a little ranking noise;
+# a missed one costs the answer, so the rules lean towards merging.
+_ARABIC_PREFIXES = ("وال", "بال", "لل", "ال", "و", "ب", "ل", "ف")
+_ARABIC_SUFFIXES = ("ات", "ون", "ين", "ية", "ها", "هم", "ة", "ه")
+_MIN_CONTENT_LETTERS = 3
+
+
+def stem(token: str) -> str:
+    if _ARABIC.search(token):
+        for p in _ARABIC_PREFIXES:
+            if token.startswith(p) and len(token) - len(p) >= 3:
+                token = token[len(p) :]
+                break
+        for s in _ARABIC_SUFFIXES:
+            if token.endswith(s) and len(token) - len(s) >= 3:
+                token = token[: -len(s)]
+                break
+        return token
+    if len(token) > 6:
+        return token[:6]
+    if len(token) > 3 and token.endswith(("s", "x")):
+        return token[:-1]
+    return token
+
+
+def content_stems(tokens: list[str]) -> list[str]:
+    """The stems of the words that carry a question's topic: no function words, no question
+    words, nothing shorter than three letters (\"y a-t-il\" is three tokens about nothing)."""
+    return [
+        stem(t)
+        for t in tokens
+        if t not in _STOPWORDS and (len(t) >= _MIN_CONTENT_LETTERS or _ARABIC.search(t))
+    ]
 
 
 class Embedder(Protocol):
@@ -152,7 +202,7 @@ class WikiIndex:
         self.signature = signature
         self.built_at = datetime.now(UTC)
         self._embedder: Embedder | None = None
-        self._tokens = [tokenize(c.text) for c in chunks]
+        self._tokens = [[stem(t) for t in tokenize(c.text)] for c in chunks]
         self._df: Counter[str] = Counter()
         for toks in self._tokens:
             self._df.update(set(toks))
@@ -211,8 +261,9 @@ class WikiIndex:
         q_tokens = tokenize(query)
         if not q_tokens:
             return []
-        content = [t for t in q_tokens if t not in _STOPWORDS] or q_tokens
-        lexical = self._bm25(q_tokens)
+        q_stems = [stem(t) for t in q_tokens]
+        content = content_stems(q_tokens) or q_stems
+        lexical = self._bm25(q_stems)
         cosines = [0.0] * len(self.chunks)
         if self._embedder is not None and self.vectors:
             qv = (await self._embedder.embed([query]))[0]
@@ -242,8 +293,10 @@ class WikiIndex:
         return hits
 
     def is_confident(self, hits: list[Hit]) -> bool:
-        """The wiki has the answer when its best hit covers the question's content words or
-        is semantically close to it. Either tolerance alone is a judgement value."""
+        """The wiki has the answer when its best hit covers enough of the question's content
+        stems or is semantically close to it. Either tolerance alone is a judgement value.
+        The bar is not the last line of defence: excerpts that pass it but do not answer
+        are declined by the model ([[NO_ANSWER]]) and the pipeline moves on to the web."""
         if not hits:
             return False
         top = hits[0]
