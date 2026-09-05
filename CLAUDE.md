@@ -8,7 +8,7 @@ This file covers **how the code is written**. For *what* to build, see `MISSION.
 
 ## Project Overview
 
-The **Virtual Agent** is a spoken assistant for a business's clients. An iPhone app captures what the client says, sends it to a service that detects the language (French, English, German or Arabic), answers from a wiki built out of `virtualagent/resources/` or, failing that, from the web, and streams the answer back as text plus ready-to-speak sentences that the app speaks as they arrive. Every turn declares where its answer came from: `wiki`, `web` or `none`.
+The **Virtual Agent** is a spoken assistant for a business's clients. An iPhone app captures what the client says, sends it to a service that detects the language (French, English, German or Arabic), answers from a wiki folder (`virtualagent/resources/` by default, watched for changes) or, failing that, from the web, and streams the answer back as text plus ready-to-speak sentences that the app speaks as they arrive. Every turn declares where its answer came from: `wiki`, `web` or `none`.
 
 Two codebases, one contract: a Python 3.11 FastAPI service under `app/backend/` and a native SwiftUI iPhone app under `app/ios/`. The contract between them is `docs/API.md`. There is no database, no web frontend and no accounts.
 
@@ -49,7 +49,7 @@ dark-factory-experiment/
 ├── FACTORY.md               # The honest account of what the gate covers and the incident log
 ├── README.md                # Human-facing overview and quick start
 ├── virtualagent/
-│   └── resources/           # THE WIKI. Every .md/.txt here is the agent's knowledge. README.md is not indexed
+│   └── resources/           # THE DEFAULT WIKI and the samples. Every .md/.txt here is knowledge; production mounts a host folder here. README.md is not indexed
 ├── app/
 │   ├── backend/
 │   │   ├── main.py          # FastAPI app: lifespan builds the wiki index and wires the agent; /api/health, /api/version, /api/languages
@@ -82,6 +82,7 @@ dark-factory-experiment/
 │   └── decisions.md         # Product values the factory chose, and the questions it stopped to ask
 ├── deploy/                  # Dockerfile, docker-compose.yml (blue/green), Caddyfile, deploy.sh, .env.example
 ├── tools/dev-console/       # ONE static page to exercise the API from a desk: types or speaks, hears sentences, shows sources. A developer tool, NOT a client
+├── tools/wiki/              # ingest.py: any document (Word, PDF, HTML, spreadsheet) -> the wiki's knowledge format. Its own uv project
 ├── scripts/factory-stop.sh  # The stop button
 └── .archon/                 # Factory workflows and command files (config.yaml is gitignored: it holds a token)
 ```
@@ -91,7 +92,7 @@ dark-factory-experiment/
 - New API routes → a new file in `app/backend/routes/`, one file per resource, mounted from `main.py` under the `/api` prefix. Every route on a session takes `Depends(get_current_session)`.
 - New agent behaviour → `app/backend/agent/`. Keep detection (`languages.py`), retrieval (`wiki/`), search (`search/`) and composition (`agent/pipeline.py`) as separate modules with the protocol seams `pipeline.py` defines.
 - New SSE event types → add the dataclass to `agent/events.py`, the encoder case to `routes/sessions.py`, the section to `docs/API.md`, and the decoder to `app/ios/VirtualAgent/Models.swift`, in the same PR.
-- New wiki formats → `app/backend/wiki/index.py` (`WIKI_EXTENSIONS` and `_read_documents`).
+- New source formats for the wiki → `tools/wiki/ingest.py`. The service reads `.md` and `.txt` only, on purpose; the converter does the rest and its dependencies never enter the service.
 - New constants and env vars → `app/backend/config.py` only.
 - New app screens or view models → `app/ios/VirtualAgent/`, one type per file, file named after the type.
 - New app network calls → `app/ios/VirtualAgent/AgentAPI.swift` only. New SSE parsing → `SSEParser.swift` only. New user-facing strings → `Phrases.swift`, in all four languages.
@@ -113,6 +114,8 @@ cd app && uv --project backend run uvicorn backend.main:app --reload --port 8000
 The service **must** be run from `app/` (not `app/backend/`): the `backend.main:app` import path requires it. Running from the wrong cwd gives `ModuleNotFoundError: No module named 'backend'`. The `--project backend` flag tells uv to use `app/backend/.venv` while cwd is `app/`.
 
 Configuration is read from `app/.env` (gitignored; template at `app/backend/.env.example`) or the environment. `OPENROUTER_API_KEY` is required: the service refuses to import without it. Startup indexes the wiki, which calls the embeddings endpoint, so a bad key fails at boot rather than on the first turn. That is deliberate.
+
+After startup the folder is **watched** (`WIKI_POLL_SECONDS`, default 10): a file added, edited or removed is re-indexed in the background, only its changed chunks are re-embedded, and the new index is swapped in atomically. To teach the running agent something, write a file into the folder; `/api/health` shows `wiki_indexed_at` moving. A rebuild that fails keeps the previous index and logs why.
 
 To run without secrets or network, use the harness: `python harness/serve.py --port 8000` starts stub providers and points the service at them and at `harness/fixtures/wiki`.
 
@@ -216,7 +219,8 @@ All env var reads happen in `app/backend/config.py`.
 | `CHAT_MODEL` | no | Default `anthropic/claude-sonnet-4.6`. For canarying a model on the inactive colour only |
 | `BRAVE_SEARCH_API_KEY` | no | The web fallback. Unset: the agent says it does not know when the wiki has nothing; `/api/health` reports `web_search: unconfigured` |
 | `WEB_SEARCH_BASE_URL` | no | Default `https://api.search.brave.com/res/v1`. The harness points it at the stub |
-| `WIKI_RESOURCES_DIR` | no | Default `<repo>/virtualagent/resources`. The image pins `/app/virtualagent/resources`; the harness points it at its fixture wiki |
+| `WIKI_RESOURCES_DIR` | no | Default `<repo>/virtualagent/resources`. The image pins `/app/virtualagent/resources` and compose mounts the host's wiki folder there; the harness points it at its fixture wiki |
+| `WIKI_POLL_SECONDS` | no | Default `10`. How often the wiki folder is checked for changes; `0` reads it once at startup |
 | `CORS_ORIGINS` | no | Comma-separated browser origins. The iOS app needs none |
 
 Everything else is a constant in `config.py` (top-k, the confidence tolerances, session TTL, history length). When adding configurability, add the constant there with a sensible default. **Never commit `.env` files.**
@@ -227,7 +231,7 @@ Everything else is a constant in `config.py` (top-k, the confidence tolerances, 
 
 The service ships via Docker Compose to a VPS, blue/green behind Caddy. Source of truth is `deploy/`; the runbook is `deploy/README.md`. The real `.env` lives only on the host at `/opt/virtualagent/.env` and is never in git or in an LLM context.
 
-- `deploy/Dockerfile` builds one image: the service plus a copy of `virtualagent/resources/`. **The wiki deploys like code**: a document merged to `main` is a new image on the inactive colour, a healthcheck that only passes once the wiki is indexed, and a Caddy flip.
+- `deploy/Dockerfile` builds one image: the service plus a copy of `virtualagent/resources/` as the default wiki. **The live wiki is a folder on the host** (`WIKI_DIR` in the host `.env`), mounted read-only over that copy in both colours; a document dropped there is indexed within seconds with no image build and no flip. Code still deploys blue/green, with a healthcheck that only passes once the wiki is indexed.
 - `app-blue` and `app-green` are identical except for name; neither publishes a host port; `deploy/upstream.conf` (gitignored, written by `deploy.sh`) names the live one.
 - `deploy.sh` runs from a systemd timer on the host and is mirrored by hand; the copy here is the source of truth.
 - Zero downtime is a hard requirement. Any change under `deploy/` must keep both colours, the healthcheck, the internal-only ports and the `import /etc/caddy/upstream.conf` line.

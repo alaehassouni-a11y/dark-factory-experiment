@@ -27,9 +27,10 @@ services:
   # does a graceful `caddy reload` to swap. Neither publishes a host port —
   # Caddy reaches them via the internal docker network by service name.
   #
-  # There is no database and no content volume. The service keeps sessions
-  # in-process (they expire after 24h) and the wiki is baked into the image,
-  # so a colour is fully described by its image + these environment variables.
+  # There is no database. The service keeps sessions in-process (they expire
+  # after 24h); the wiki is a host folder mounted into both colours (see the
+  # volumes below), so a colour is fully described by its image + these
+  # environment variables + that one folder.
   #
   app-blue:
     build:
@@ -55,6 +56,13 @@ services:
       # canary deploys override it to test a new model on the inactive
       # blue/green slot before flipping Caddy.
       CHAT_MODEL: ${CHAT_MODEL:-anthropic/claude-sonnet-4.6}
+    volumes:
+      # THE LIVE WIKI. A folder on the host, mounted read-only over the copy the image
+      # carries. The service watches it and re-indexes within seconds when a file is
+      # added, changed or removed, so a document is knowledge without a build or a
+      # flip. Default: the checkout's own folder, so a host that sets nothing keeps
+      # the old behaviour (documents arrive with `git pull`).
+      - ${WIKI_DIR:-../virtualagent/resources}:/app/virtualagent/resources:ro
     healthcheck:
       test:
         - "CMD"
@@ -79,6 +87,8 @@ services:
       WIKI_RESOURCES_DIR: /app/virtualagent/resources
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       CHAT_MODEL: ${CHAT_MODEL:-anthropic/claude-sonnet-4.6}
+    volumes:
+      - ${WIKI_DIR:-../virtualagent/resources}:/app/virtualagent/resources:ro
     healthcheck:
       test:
         - "CMD"
