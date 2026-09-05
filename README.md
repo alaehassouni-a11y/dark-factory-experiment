@@ -195,6 +195,14 @@ curl -s -X POST http://localhost:8000/api/sessions -H 'Content-Type: application
 
 Then send a turn with the returned token as a bearer token and watch the stream (see `docs/API.md`).
 
+Or use the developer console, a single static page that types or listens, streams the answer, speaks each sentence as it arrives and shows every turn's source. Serve it on a fixed origin and allow that origin on the service:
+
+```bash
+python -m http.server 8080 --directory tools/dev-console
+```
+
+with `CORS_ORIGINS=http://localhost:8080` in `app/.env`, then open http://localhost:8080. It is a tool for people testing the service, not a client of the product; the iOS app remains the only client.
+
 ### Run the app
 
 See [`app/ios/README.md`](app/ios/README.md): `xcodegen generate`, open the project, run on a simulator or an iPhone pointed at the service's LAN address. The app has not yet been compiled on a Mac; expect to fix the first build.

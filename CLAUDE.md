@@ -81,6 +81,7 @@ dark-factory-experiment/
 │   ├── locks/floor.json     # The ratchet
 │   └── decisions.md         # Product values the factory chose, and the questions it stopped to ask
 ├── deploy/                  # Dockerfile, docker-compose.yml (blue/green), Caddyfile, deploy.sh, .env.example
+├── tools/dev-console/       # ONE static page to exercise the API from a desk: types or speaks, hears sentences, shows sources. A developer tool, NOT a client
 ├── scripts/factory-stop.sh  # The stop button
 └── .archon/                 # Factory workflows and command files (config.yaml is gitignored: it holds a token)
 ```
@@ -95,6 +96,7 @@ dark-factory-experiment/
 - New app screens or view models → `app/ios/VirtualAgent/`, one type per file, file named after the type.
 - New app network calls → `app/ios/VirtualAgent/AgentAPI.swift` only. New SSE parsing → `SSEParser.swift` only. New user-facing strings → `Phrases.swift`, in all four languages.
 - New wiki content → `virtualagent/resources/`. That is the only authoring surface; there is no upload path.
+- The developer console (`tools/dev-console/index.html`) is for people testing the service at a desk. It is never deployed, never linked from the product, and never grows features the app does not have: MISSION.md forbids any client other than the iOS app, and this is not one.
 
 ---
 
@@ -113,6 +115,8 @@ The service **must** be run from `app/` (not `app/backend/`): the `backend.main:
 Configuration is read from `app/.env` (gitignored; template at `app/backend/.env.example`) or the environment. `OPENROUTER_API_KEY` is required: the service refuses to import without it. Startup indexes the wiki, which calls the embeddings endpoint, so a bad key fails at boot rather than on the first turn. That is deliberate.
 
 To run without secrets or network, use the harness: `python harness/serve.py --port 8000` starts stub providers and points the service at them and at `harness/fixtures/wiki`.
+
+To talk to it from a browser, serve `tools/dev-console/` on a fixed origin and allow that origin: `python -m http.server 8080 --directory tools/dev-console` with `CORS_ORIGINS=http://localhost:8080` in `app/.env` (or in the environment of `serve.py`). Chrome or Edge for the microphone; every browser speaks.
 
 ---
 

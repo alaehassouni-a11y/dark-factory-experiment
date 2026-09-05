@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Virtual Agent – developer console</title>
+<!--
+  A DEVELOPER CONSOLE for the service, not a client of the product. MISSION.md forbids any
+  client other than the iOS app; this page exists so a person at a desk can exercise the
+  API in docs/API.md the way the app does, hear the sentences spoken as they arrive, and
+  read the declared source of every turn. It is one static file with no build step.
+
+  Serve it from any static server on a fixed origin and allow that origin on the service:
+
+      python -m http.server 8080 --directory tools/dev-console
+      CORS_ORIGINS=http://localhost:8080  (in app/.env, or the environment of serve.py)
+
+  Speech uses the browser's own engines: speechSynthesis for output (every browser) and
+  webkitSpeechRecognition for input (Chrome and Edge). Neither touches the service.
+-->
+<style>
+  :root { color-scheme: light dark; --bg: #f6f6f4; --fg: #1d1d1b; --muted: #6b6b66; --line: #d9d9d4;
+          --agent: #ffffff; --client: #dfeeff; --accent: #2f6fdb; --warn: #b3261e; --wiki: #1f7a3a; --web: #9a5b00; --none: #6b6b66; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --fg: #ececea; --muted: #9a9a94; --line: #3a3a37; --agent: #22221f; --client: #1f3550;
+            --accent: #7aa7ff; --warn: #ff8a80; --wiki: #6fd08c; --web: #ffc36b; --none: #9a9a94; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: .6rem 1rem; align-items: center; padding: .8rem 1rem; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 1rem; margin: 0 1rem 0 0; font-weight: 600; }
+  header label { color: var(--muted); font-size: .85rem; display: flex; align-items: center; gap: .35rem; }
+  input, select, button, textarea { font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: .35rem .55rem; }
+  button { cursor: pointer; } button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  main { max-width: 860px; margin: 0 auto; padding: 1rem; }
+  #status { color: var(--muted); font-size: .85rem; min-height: 1.2em; margin-bottom: .6rem; }
+  #status.error { color: var(--warn); }
+  #transcript { display: flex; flex-direction: column; gap: .6rem; min-height: 40vh; }
+  .msg { max-width: 78%; padding: .6rem .8rem; border-radius: 12px; border: 1px solid var(--line); white-space: pre-wrap; }
+  .msg.agent { align-self: flex-start; background: var(--agent); }
+  .msg.client { align-self: flex-end; background: var(--client); }
+  .meta { font-size: .78rem; color: var(--muted); margin-top: .4rem; display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+  .badge { border-radius: 999px; padding: .05rem .5rem; border: 1px solid currentColor; font-weight: 600; }
+  .badge.wiki { color: var(--wiki); } .badge.web { color: var(--web); } .badge.none { color: var(--none); }
+  .sources { margin: .3rem 0 0; padding-left: 1.1rem; font-size: .82rem; color: var(--muted); }
+  .sources li { margin: .15rem 0; }
+  .streaming::after { content: "▍"; animation: blink 1s steps(2) infinite; color: var(--muted); }
+  @keyframes blink { 50% { opacity: 0; } }
+  footer { position: sticky; bottom: 0; background: var(--bg); border-top: 1px solid var(--line); padding: .8rem 1rem; }
+  footer .row { max-width: 860px; margin: 0 auto; display: flex; gap: .5rem; align-items: flex-end; }
+  textarea { flex: 1; resize: none; min-height: 2.4rem; max-height: 8rem; }
+  #mic.listening { border-color: var(--warn); color: var(--warn); }
+  #lang { font-weight: 600; }
+  .hint { color: var(--muted); font-size: .8rem; max-width: 860px; margin: .4rem auto 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Virtual Agent · developer console</h1>
+  <label>Service <input id="url" size="24" value="http://localhost:8000"></label>
+  <label>Hint
+    <select id="hint">
+      <option value="">device / none</option>
+      <option value="fr">fr</option><option value="en">en</option><option value="de">de</option><option value="ar">ar</option>
+    </select>
+  </label>
+  <label><input id="speak" type="checkbox" checked> speak sentences aloud</label>
+  <button id="new" class="primary">New session</button>
+  <span id="lang" title="language of the session"></span>
+</header>
+
+<main>
+  <div id="status"></div>
+  <div id="transcript"></div>
+</main>
+
+<footer>
+  <div class="row">
+    <button id="mic" title="Listen (Chrome / Edge)">🎤</button>
+    <textarea id="text" rows="1" placeholder="Type what the client says, or press the microphone… (Enter sends)"></textarea>
+    <button id="send" class="primary">Send</button>
+  </div>
+  <p class="hint">Every agent turn shows its <b>kind</b> and its <b>source</b>: wiki, web or none. Sentences are spoken by the browser as each one completes, before the answer has finished streaming.</p>
+</footer>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const urlEl = $('url'), hintEl = $('hint'), speakEl = $('speak'), langEl = $('lang'), statusEl = $('status');
+  const transcript = $('transcript'), textEl = $('text'), micBtn = $('mic'), sendBtn = $('send');
+
+  const LOCALES = { fr: 'fr-FR', en: 'en-US', de: 'de-DE', ar: 'ar-SA' };
+  let session = null;          // { id, token }
+  let language = null;         // session language code, or null
+  let voiceLocale = 'en-US';   // what the recogniser listens in
+  let busy = false;
+
+  // A stable client id, like the app keeps one: the daily cap is counted per client.
+  let clientId = localStorage.getItem('va_client_id');
+  if (!clientId) { clientId = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)); localStorage.setItem('va_client_id', clientId); }
+  urlEl.value = localStorage.getItem('va_service_url') || urlEl.value;
+  urlEl.addEventListener('change', () => localStorage.setItem('va_service_url', urlEl.value.trim()));
+
+  const setStatus = (text, isError = false) => { statusEl.textContent = text || ''; statusEl.className = isError ? 'error' : ''; };
+  const setLanguage = (code) => {
+    language = code;
+    voiceLocale = LOCALES[code] || voiceLocale;
+    langEl.textContent = code ? `language: ${code} (${voiceLocale})` : 'language: not yet detected';
+  };
+
+  // ---- speech output: the browser speaks each sentence in the locale the service names
+  const speak = (text, locale) => {
+    if (!speakEl.checked || !('speechSynthesis' in window)) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = locale || voiceLocale;
+    const voice = speechSynthesis.getVoices().find(v => v.lang === u.lang) ||
+                  speechSynthesis.getVoices().find(v => v.lang.startsWith(u.lang.split('-')[0]));
+    if (voice) u.voice = voice;
+    speechSynthesis.speak(u);
+  };
+  if ('speechSynthesis' in window) speechSynthesis.getVoices(); // warm the voice list
+
+  // ---- transcript rendering
+  const addMessage = (role, text) => {
+    const el = document.createElement('div');
+    el.className = `msg ${role}`;
+    el.textContent = text;
+    transcript.appendChild(el);
+    el.scrollIntoView({ block: 'end' });
+    return el;
+  };
+  const addMeta = (msgEl, turn, sources) => {
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    if (turn) {
+      const kind = document.createElement('span'); kind.textContent = turn.kind.replace('_', ' ');
+      const src = document.createElement('span'); src.className = `badge ${turn.source}`; src.textContent = `source: ${turn.source}`;
+      meta.append(kind, src);
+    }
+    msgEl.appendChild(meta);
+    if (sources && sources.length) {
+      const ul = document.createElement('ul'); ul.className = 'sources';
+      for (const s of sources) {
+        const li = document.createElement('li');
+        const ref = s.kind === 'wiki' ? s.location : s.url;
+        li.textContent = `${s.kind}: ${s.title}${ref ? ' — ' + ref : ''}`;
+        ul.appendChild(li);
+      }
+      msgEl.appendChild(ul);
+    }
+  };
+
+  // ---- HTTP helpers
+  const base = () => urlEl.value.trim().replace(/\/+$/, '');
+  const explain = async (res) => {
+    let body = {};
+    try { body = await res.json(); } catch {}
+    const detail = typeof body.detail === 'string' ? body.detail : '';
+    switch (res.status) {
+      case 401: return 'Refused: no session token (401).';
+      case 403: return 'Refused: this token belongs to another session (403).';
+      case 404: return 'Unknown session (404). It may have expired; start a new one.';
+      case 422: return `Rejected (422): ${detail || 'empty text'}.`;
+      case 429: return `Daily turn cap reached (429). Resets at ${body.resets_at || '?'}.`;
+      default: return `HTTP ${res.status}${detail ? ': ' + detail : ''}.`;
+    }
+  };
+
+  async function newSession() {
+    speechSynthesis && speechSynthesis.cancel();
+    transcript.innerHTML = '';
+    session = null;
+    setLanguage(null);
+    setStatus('Opening a session…');
+    try {
+      const res = await fetch(`${base()}/api/sessions`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: clientId, language_hint: hintEl.value || null }),
+      });
+      if (res.status !== 201) { setStatus(await explain(res), true); return; }
+      const data = await res.json();
+      session = { id: data.session_id, token: data.session_token };
+      setLanguage(data.language);
+      const g = data.greeting;
+      const el = addMessage('agent', g.text);
+      addMeta(el, { kind: 'question', source: 'none' }, []);
+      speak(g.text, g.voice_locale);
+      setStatus(`Session ${session.id} open.`);
+    } catch (e) {
+      setStatus(`Cannot reach ${base()} — is the service running, and is this page's origin in CORS_ORIGINS? (${e.message})`, true);
+    }
+  }
+
+  // ---- one turn: POST, then read the SSE stream exactly as docs/API.md frames it
+  async function sendTurn(text) {
+    text = text.trim();
+    if (!text || busy) return;
+    if (!session) { await newSession(); if (!session) return; }
+    busy = true; sendBtn.disabled = true;
+    speechSynthesis && speechSynthesis.cancel();
+    addMessage('client', text);
+    const reply = addMessage('agent', '');
+    reply.classList.add('streaming');
+    setStatus('…');
+    let sources = [], turn = null;
+    try {
+      const res = await fetch(`${base()}/api/sessions/${session.id}/turns`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream', 'Authorization': `Bearer ${session.token}` },
+        body: JSON.stringify({ text }),
+      });
+      if (res.status !== 200) {
+        setStatus(await explain(res), true);
+        if ([401, 403, 404].includes(res.status)) session = null;
+        reply.remove();
+        return;
+      }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      const handle = (block) => {
+        let event = null; const data = [];
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+        }
+        if (!data.length) return false;
+        const payload = data.join('\n');
+        if (event === null && payload === '[DONE]') return true;
+        if (event === null) { let tok; try { tok = JSON.parse(payload); } catch { tok = payload; } reply.textContent += tok; return false; }
+        const obj = JSON.parse(payload);
+        if (event === 'language') { if (obj.language) setLanguage(obj.language); else setStatus('The client was not understood as any supported language; the agent asks, in English, to continue in one of the four.'); }
+        else if (event === 'sentence') speak(obj.text, obj.voice_locale);
+        else if (event === 'sources') sources = obj;
+        else if (event === 'turn') turn = obj;
+        return false;
+      };
+      outer: while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n\n')) !== -1) {
+          const block = buf.slice(0, i).replace(/\r/g, ''); buf = buf.slice(i + 2);
+          if (handle(block)) break outer;
+        }
+      }
+      reply.classList.remove('streaming');
+      addMeta(reply, turn, sources);
+      if (!statusEl.classList.contains('error')) setStatus(`Turn closed: ${turn ? turn.kind + ' / ' + turn.source : 'no turn event'}.`);
+    } catch (e) {
+      reply.classList.remove('streaming');
+      setStatus(`Stream failed: ${e.message}`, true);
+    } finally {
+      busy = false; sendBtn.disabled = false; textEl.focus();
+    }
+  }
+
+  // ---- speech input: the browser listens in the session's voice locale
+  let recog = null;
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition) { micBtn.disabled = true; micBtn.title = 'Speech recognition needs Chrome or Edge'; }
+  micBtn.addEventListener('click', () => {
+    if (recog) { recog.stop(); return; }
+    recog = new Recognition();
+    recog.lang = voiceLocale;
+    recog.interimResults = true;
+    micBtn.classList.add('listening'); setStatus(`Listening in ${recog.lang}…`);
+    recog.onresult = (ev) => {
+      const t = Array.from(ev.results).map(r => r[0].transcript).join(' ');
+      textEl.value = t;
+      if (ev.results[ev.results.length - 1].isFinal) { recog.stop(); }
+    };
+    recog.onerror = (ev) => setStatus(`Microphone: ${ev.error}`, true);
+    recog.onend = () => {
+      micBtn.classList.remove('listening'); recog = null;
+      const heard = textEl.value.trim();
+      if (heard) { textEl.value = ''; sendTurn(heard); } else if (!statusEl.classList.contains('error')) setStatus('');
+    };
+    recog.start();
+  });
+
+  // ---- wiring
+  $('new').addEventListener('click', newSession);
+  sendBtn.addEventListener('click', () => { const t = textEl.value; textEl.value = ''; sendTurn(t); });
+  textEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendBtn.click(); } });
+  newSession();
+})();
+</script>
+</body>
+</html>
