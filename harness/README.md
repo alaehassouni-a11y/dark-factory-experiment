@@ -5,12 +5,12 @@ python harness/ci.py --quick   # static + unit. A few minutes. Runs anywhere wit
 python harness/ci.py           # the whole gate. Needs uv and nothing else: no secrets, no network.
 ```
 
-Measured 2026-09-04 on `product/virtual-agent`:
+Measured 2026-09-06 on `product/virtual-agent`:
 
 ```
 HARNESS_START mode=full driver=http
 STATIC_OK
-UNIT_PASSED tests=52
+UNIT_PASSED tests=65
 APP_STARTED port=61766
 E2E_PASSED steps=12
 HOLDOUT_PASSED scenarios=5 assertions=32
@@ -32,7 +32,7 @@ first rung.
 |---|---|
 | `ci.py` · `appproc.py` | **Verbatim from the `build-dark-factory` skill.** The ladder and the app-process manager are the same in every factory; do not edit them here. |
 | `harness.config.json` | This repo. Every command the gate runs. |
-| `static.py` · `unit.py` | This repo. The static rung is ruff, ruff-format, mypy and `static_ios.py`; the unit rung is pytest with a parsed count. Each says what it does **not** cover. |
+| `static.py` · `unit.py` | This repo. The static rung is ruff, ruff-format, mypy, `static_ios.py`, and ruff on `tools/wiki`; the unit rung is pytest on the service and on `tools/wiki`, with parsed counts. Each says what it does **not** cover. |
 | `static_ios.py` | This repo. What can honestly be checked of the app without a Swift toolchain: the XcodeGen spec, the Info.plist, balanced braces. **Not a compile.** |
 | `serve.py` · `stubs.py` | This repo. Starts stub providers (an OpenAI-shaped model and embeddings, a Brave-shaped search) on a free port, points the service at them and at `fixtures/wiki`, runs uvicorn as a child that dies with it. |
 | `fixtures/wiki/` | This repo. The wiki the journey runs against: opening hours in English and French, a returns policy. **Locked**: the journey and the comprehensive-test scenarios both assume it. |

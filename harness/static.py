@@ -6,7 +6,8 @@
     python harness/static.py
 
 The service: ruff (lint), ruff (format), mypy, all under the backend's own environment so
-the versions are the pinned ones. The app: `static_ios.py`, which parses the XcodeGen spec
+the versions are the pinned ones. The wiki import tool (`tools/wiki`): ruff lint and format
+under its own environment. The app: `static_ios.py`, which parses the XcodeGen spec
 and the Info.plist and sanity-checks every Swift file - NOT a compile. There is no Swift
 toolchain on the machines this gate runs on, and a check that pretends otherwise would be
 a smaller check wearing a bigger check's name. The count printed at the end is of checks
@@ -23,6 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BACKEND = ROOT / "app" / "backend"
+TOOLS = ROOT / "tools" / "wiki"
 UV = shutil.which("uv") or str(Path.home() / ".local" / "bin" / "uv")
 
 CHECKS = [
@@ -30,6 +32,8 @@ CHECKS = [
     ("ruff-format", BACKEND, [UV, "run", "ruff", "format", "--check", "."]),
     ("mypy", BACKEND, [UV, "run", "mypy", "."]),
     ("ios-manifests", BACKEND, [UV, "run", "python", str(ROOT / "harness" / "static_ios.py")]),
+    ("ruff-lint-tools", TOOLS, [UV, "run", "ruff", "check", "."]),
+    ("ruff-format-tools", TOOLS, [UV, "run", "ruff", "format", "--check", "."]),
 ]
 
 
