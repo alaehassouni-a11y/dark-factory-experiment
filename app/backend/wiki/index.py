@@ -1,5 +1,9 @@
-"""The wiki: every Markdown and plain-text file under `virtualagent/resources`, chunked,
-indexed twice (BM25 over words, cosine over embeddings), fused with reciprocal rank fusion.
+"""The wiki: every Markdown and plain-text file under the wiki folder, chunked, indexed
+twice (BM25 over words, cosine over embeddings), fused with reciprocal rank fusion.
+
+The folder is watched (`backend.main`): `folder_signature` is what changes when a file is
+added, edited or removed, and `WikiIndex.build(..., previous=)` reuses the embeddings of
+every chunk whose text did not change, so a one-file edit costs one file of embeddings.
 
 Two indexes because the client asks in one of four languages and the documents are in
 whichever language they were written in. Words match within a language; embeddings match
@@ -10,11 +14,13 @@ above the similarity floor.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import re
 from collections import Counter
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -49,17 +55,38 @@ class Hit:
     cosine: float
 
 
+def _wiki_files(root: Path) -> list[Path]:
+    if not root.is_dir():
+        return []
+    return [
+        p
+        for p in sorted(root.rglob("*"))
+        if p.is_file()
+        and p.suffix.lower() in WIKI_EXTENSIONS
+        and p.name.lower() != "readme.md"
+        and not p.name.startswith(".")
+    ]
+
+
+def folder_signature(root: Path) -> str:
+    """A short digest of which wiki files exist and when they last changed. Equal
+    signatures mean nothing to re-index; a file added, edited (mtime or size) or removed
+    changes it. Cheap enough to compute every few seconds over a folder of documents."""
+    h = hashlib.sha1()
+    for p in _wiki_files(root):
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        h.update(f"{p.relative_to(root).as_posix()}|{st.st_size}|{st.st_mtime_ns}\n".encode())
+    return h.hexdigest()
+
+
 def _read_documents(root: Path) -> list[tuple[str, str, str]]:
     """(title, location, body) for every wiki file, README excluded: it describes the
     folder, it is not knowledge."""
-    if not root.is_dir():
-        return []
     docs = []
-    for path in sorted(root.rglob("*")):
-        if not path.is_file() or path.suffix.lower() not in WIKI_EXTENSIONS:
-            continue
-        if path.name.lower() == "readme.md" or path.name.startswith("."):
-            continue
+    for path in _wiki_files(root):
         body = path.read_text(encoding="utf-8", errors="replace")
         title = path.stem.replace("-", " ").replace("_", " ").strip()
         for line in body.splitlines():
@@ -112,10 +139,18 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 
 class WikiIndex:
-    def __init__(self, chunks: list[Chunk], vectors: list[list[float]], documents: int) -> None:
+    def __init__(
+        self,
+        chunks: list[Chunk],
+        vectors: list[list[float]],
+        documents: int,
+        signature: str = "",
+    ) -> None:
         self.chunks = chunks
         self.vectors = vectors
         self.document_count = documents
+        self.signature = signature
+        self.built_at = datetime.now(UTC)
         self._embedder: Embedder | None = None
         self._tokens = [tokenize(c.text) for c in chunks]
         self._df: Counter[str] = Counter()
@@ -128,18 +163,29 @@ class WikiIndex:
         return len(self.chunks)
 
     @classmethod
-    async def build(cls, root: Path, embedder: Embedder) -> WikiIndex:
+    async def build(
+        cls, root: Path, embedder: Embedder, previous: WikiIndex | None = None
+    ) -> WikiIndex:
+        """Read, chunk and embed the folder. With `previous`, chunks whose text is unchanged
+        keep their embedding instead of being sent to the provider again."""
+        signature = folder_signature(root)
         docs = _read_documents(root)
         chunks: list[Chunk] = []
         for title, location, body in docs:
             chunks.extend(chunk_document(title, location, body))
-        vectors: list[list[float]] = []
-        for start in range(0, len(chunks), 64):
-            batch = chunks[start : start + 64]
-            vectors.extend(await embedder.embed([c.text for c in batch]))
+        known: dict[str, list[float]] = {}
+        if previous is not None:
+            known = {c.text: v for c, v in zip(previous.chunks, previous.vectors, strict=False)}
+        vectors: list[list[float] | None] = [known.get(c.text) for c in chunks]
+        todo = [i for i, v in enumerate(vectors) if v is None]
+        for start in range(0, len(todo), 64):
+            batch = todo[start : start + 64]
+            fresh = await embedder.embed([chunks[i].text for i in batch])
+            for i, v in zip(batch, fresh, strict=False):
+                vectors[i] = v
         if not docs:
             logger.warning("wiki folder %s has no documents; every question will fall back", root)
-        index = cls(chunks, vectors, len(docs))
+        index = cls(chunks, [v or [] for v in vectors], len(docs), signature)
         index._embedder = embedder
         return index
 

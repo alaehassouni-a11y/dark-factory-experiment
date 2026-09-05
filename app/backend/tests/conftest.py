@@ -41,8 +41,10 @@ class FakeLLM:
     ) -> None:
         self.script = script
         self.calls: list[list[dict[str, str]]] = []
+        self.embedded: list[str] = []  # every text sent to the embeddings endpoint
 
     async def embed(self, texts: list[str]) -> list[list[float]]:
+        self.embedded.extend(texts)
         return [bag(t) for t in texts]
 
     async def stream(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:

@@ -29,10 +29,15 @@ EMBEDDING_MODEL: str = "openai/text-embedding-3-small"
 
 # --- the wiki -----------------------------------------------------------------------------
 # The requirement names the folder: "a wiki, created from the virtualagent/resources folder".
+# `or`, not a default argument: an exported-but-empty variable is "unset", not "the cwd".
 WIKI_RESOURCES_DIR: Path = Path(
-    os.environ.get("WIKI_RESOURCES_DIR", str(REPO_ROOT / "virtualagent" / "resources"))
+    os.environ.get("WIKI_RESOURCES_DIR") or str(REPO_ROOT / "virtualagent" / "resources")
 )
 WIKI_TOP_K: int = 5
+# How often the service looks at the wiki folder for added, changed or removed files, in
+# seconds. A change rebuilds the index in the background and swaps it in; no restart, no
+# deploy. 0 disables the watch (the folder is then read once, at startup).
+WIKI_POLL_SECONDS: int = int(os.environ.get("WIKI_POLL_SECONDS", "10"))
 # The confidence decision between wiki and web (MISSION hard invariant 2 is the ORDER;
 # these are the tolerances the order is judged with, and they are judgement values).
 WIKI_MIN_TERM_COVERAGE: float = 0.5
