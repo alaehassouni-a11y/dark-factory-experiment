@@ -8,174 +8,146 @@ This file covers **how the code is written**. For *what* to build, see `MISSION.
 
 ## Project Overview
 
-**DynaChat** is a RAG-powered chat interface that lets viewers query a single YouTube channel's content and get streaming answers with per-chunk citations that deep-link to the exact timestamp in the source video. FastAPI + Python backend, React + Vite + TypeScript frontend, SQLite for local dev (Postgres + pgvector already provisioned in production — see **Deployment** below).
+The **Virtual Agent** is a spoken assistant for a business's clients. An iPhone app captures what the client says, sends it to a service that detects the language (French, English, German or Arabic), answers from a wiki built out of `virtualagent/resources/` or, failing that, from the web, and streams the answer back as text plus ready-to-speak sentences that the app speaks as they arrive. Every turn declares where its answer came from: `wiki`, `web` or `none`.
+
+Two codebases, one contract: a Python 3.11 FastAPI service under `app/backend/` and a native SwiftUI iPhone app under `app/ios/`. The contract between them is `docs/API.md`. There is no database, no web frontend and no accounts.
 
 ---
 
 ## Tech Stack
 
-**Backend**
-- Python 3.11+ (not specified in any lockfile; don't rely on 3.12+ features)
-- `uv` for package management (not pip, not poetry) — `backend/pyproject.toml` is the dependency source of truth, `backend/uv.lock` pins exact versions
-- FastAPI with `uvicorn[standard]` ASGI server
-- `asyncpg` for async Postgres access (via connection pool from `db/postgres.py`)
-- `alembic` for schema migrations (one Alembic migration layer for all tables)
-- `docling-core[chunking]` for transcript chunking (HybridChunker)
-- `openai` SDK pointed at OpenRouter's OpenAI-compatible endpoint (for both embeddings and chat completions)
-- `numpy` for in-process cosine similarity
-- `python-dotenv` for config loading
+**Service (`app/backend/`)**
+- Python 3.11+ (do not rely on 3.12+ features)
+- `uv` for package management (not pip, not poetry) - `pyproject.toml` is the dependency source of truth, `uv.lock` pins exact versions and is committed
+- FastAPI with `uvicorn[standard]`
+- `openai` SDK pointed at OpenRouter's OpenAI-compatible endpoint, for both chat completions and embeddings
+- `httpx` for the one other outbound call (Brave Search)
+- `python-dotenv` for the optional local `.env`
+- Dev tools, pinned in `[project.optional-dependencies].dev`: `ruff`, `mypy`, `pytest`, `pytest-asyncio`, `respx`, `pyyaml`
 
-**Frontend**
-- Bun (not npm, not pnpm — use `bun install`, `bun run dev`, `bun run build`)
-- React 18.3, TypeScript 5.4, Vite 5.2
-- `react-router-dom` v6 for routing
-- `react-markdown` + `remark-gfm` for assistant message rendering
-- `react-syntax-highlighter` for code blocks
-- Tailwind CSS 3.4 (no component library — components are built from Tailwind primitives)
-- Vanilla `fetch()` for API calls (no axios, no SDK) — typed wrappers in `src/lib/api.ts`
+**App (`app/ios/`)**
+- Swift 5.9, SwiftUI, iOS 17+
+- Apple frameworks only: `Speech` (recognition), `AVFoundation` (synthesis, audio session), `URLSession` (networking). **No third-party dependencies.**
+- The project is described by `project.yml` and generated with XcodeGen. Do not commit a generated `.xcodeproj`.
+
+**Harness (`harness/`, `.factory/`)**
+- Plain Python 3.11, stdlib only where it runs before the service's environment is guaranteed to exist (`stubs.py`, `serve.py`, `ci.py`, `appproc.py`)
 
 ---
 
 ## Repo Layout
 
 ```
-rag-youtube-chat/
-├── MISSION.md               # Product scope — factory reads this at triage
-├── FACTORY_RULES.md         # Factory operational rules — every workflow reads this
-├── CLAUDE.md                # This file — code conventions
-├── README.md                # Human-facing quick start
-├── spec.md                  # Product/design spec (reference, not governance)
+dark-factory-experiment/
+├── requirements.md          # The requirement, four sentences, verbatim
+├── docs/
+│   ├── virtualagent.prd.md  # The PRD written from those sentences - changes first, MISSION.md changes with it
+│   └── API.md               # The service/app contract: every endpoint and SSE event
+├── MISSION.md               # The PRD compressed to what the factory must obey
+├── FACTORY_RULES.md         # How the factory operates - every workflow reads this
+├── CLAUDE.md                # This file - code conventions
+├── FACTORY.md               # The honest account of what the gate covers and the incident log
+├── README.md                # Human-facing overview and quick start
+├── virtualagent/
+│   └── resources/           # THE WIKI. Every .md/.txt here is the agent's knowledge. README.md is not indexed
 ├── app/
-│   ├── start.sh             # POSIX bootstrap: venv → pip install → uvicorn + bun dev
-│   ├── start.bat            # Windows equivalent
 │   ├── backend/
-│   │   ├── main.py          # FastAPI app factory, lifespan init, /api/health
-│   │   ├── config.py        # All env var reads + hardcoded constants
-│   │   ├── pyproject.toml   # uv dependencies + tool config (ruff, mypy, pytest)
-│   │   ├── uv.lock          # uv lockfile (committed, pinned versions)
-│   │   ├── data/
-│   │   │   ├── chat.db      # SQLite database (auto-created, gitignored)
-│   │   │   └── seed.py      # 10 mock videos seeded on first startup
-│   │   ├── db/
-│   │   │   ├── schema.py    # CREATE TABLE IF NOT EXISTS, PRAGMAs, init_db()
-│   │   │   └── repository.py # ALL raw SQL lives here — nowhere else
-│   │   ├── llm/
-│   │   │   └── openrouter.py # stream_chat() async generator, SSE-formatted output
-│   │   ├── rag/
-│   │   │   ├── catalog.py      # In-process video catalog cache; builds cache_control block for system prompt
-│   │   │   ├── chunker.py      # Docling HybridChunker wrapper
-│   │   │   ├── embeddings.py  # embed_text / embed_batch via OpenRouter
-│   │   │   ├── retriever.py    # NumPy cosine similarity top-k (legacy)
-│   │   │   └── retriever_hybrid.py  # RRF hybrid (tsvector + pgvector, replaces retriever.py for message retrieval)
-│   │   ├── routes/
-│   │   │   ├── channels.py      # POST /api/channels/sync, GET /api/channels/sync-runs
-│   │   │   ├── conversations.py # GET/POST/DELETE /api/conversations*, GET /api/videos
-│   │   │   ├── messages.py      # POST /api/conversations/{id}/messages (streaming SSE)
-│   │   │   └── ingest.py        # POST /api/ingest
-│   │   └── services/
-│   │       └── supadata.py      # Supadata API client (channel video enumeration, transcript fetching)
-│   └── frontend/
-│       ├── package.json      # Bun dependencies + scripts
-│       ├── vite.config.ts    # Dev server port, API proxy to backend
-│       ├── tsconfig.json
-│       ├── index.html
-│       └── src/
-│           ├── main.tsx      # React root
-│           ├── App.tsx       # BrowserRouter + layout
-│           ├── components/   # ChatArea, Sidebar, Message, MarkdownRenderer, ChatInput, VideoExplorer, ToastProvider
-│           ├── hooks/        # useConversations, useMessages, useStreamingResponse, useToast
-│           ├── lib/
-│           │   └── api.ts    # All typed fetch wrappers + TypeScript interfaces
-│           └── styles/
-│               └── globals.css # Tailwind imports
-└── .archon/
-    └── config.yaml           # Per-codebase Archon env (GITIGNORED — holds MiniMax auth token)
+│   │   ├── main.py          # FastAPI app: lifespan builds the wiki index and wires the agent; /api/health, /api/version, /api/languages
+│   │   ├── config.py        # Every env var read exactly once; every hardcoded constant
+│   │   ├── languages.py     # THE supported set, names, voice locales, greetings, no-answer phrases, detection
+│   │   ├── auth.py          # get_current_session: the bearer-token check every session route depends on
+│   │   ├── rate_limit.py    # The 100 turns/client/24h cap. One number, one module
+│   │   ├── agent/
+│   │   │   ├── pipeline.py  # Agent.respond(): detect -> wiki -> web -> "I do not know". The order is code
+│   │   │   ├── events.py    # The five event types one turn is made of
+│   │   │   ├── prompts.py   # The system prompt and the two protocol markers
+│   │   │   └── sentences.py # Incremental sentence splitter (what makes the agent live)
+│   │   ├── wiki/index.py    # Read, chunk, index (BM25 + cosine, RRF), the confidence decision
+│   │   ├── search/web.py    # Brave Search client; unavailable is a state, not an error
+│   │   ├── sessions/store.py# In-process sessions and transcripts, 24h TTL
+│   │   ├── llm/openrouter.py# The only inference client
+│   │   ├── routes/sessions.py # POST /api/sessions, GET/DELETE /api/sessions/{id}, POST .../turns (SSE). The only file that knows the wire format
+│   │   ├── tests/           # pytest; fakes at the provider boundary; fixtures/wiki is the test wiki
+│   │   ├── pyproject.toml   # deps + ruff/mypy/pytest config
+│   │   └── uv.lock
+│   └── ios/
+│       ├── project.yml      # XcodeGen spec
+│       ├── README.md        # How to generate, run and what has NOT been verified
+│       ├── VirtualAgent/    # App sources, one type per file
+│       └── VirtualAgentTests/
+├── harness/                 # The gate: ci.py (the ladder), static.py, unit.py, serve.py, stubs.py, e2e.py, mutations/
+├── .factory/
+│   ├── holdout/run.py       # Scenarios the builder is blocked from reading
+│   ├── locks/floor.json     # The ratchet
+│   └── decisions.md         # Product values the factory chose, and the questions it stopped to ask
+├── deploy/                  # Dockerfile, docker-compose.yml (blue/green), Caddyfile, deploy.sh, .env.example
+├── scripts/factory-stop.sh  # The stop button
+└── .archon/                 # Factory workflows and command files (config.yaml is gitignored: it holds a token)
 ```
 
-**Placement rules** (where new files go):
+**Placement rules** (where new code goes):
 
-- New API routes → new file in `app/backend/routes/`, one file per resource. Mount from `main.py`.
-- New SQL queries → `app/backend/db/repository.py` only. Never write SQL in route handlers, services, or components.
-- New schema changes → `app/backend/db/schema.py`. For the current SQLite phase, use `CREATE TABLE IF NOT EXISTS` with portable SQL. See "Database" section for the Postgres-portability rules you must follow *now*.
-- New RAG pipeline steps → `app/backend/rag/`. Keep chunker, embeddings, and retriever as separate modules.
-- New React components → `app/frontend/src/components/`, one component per file, named exports matching filename.
-- New React hooks → `app/frontend/src/hooks/`, prefix with `use`.
-- New API client functions → `app/frontend/src/lib/api.ts`. Keep all fetch calls in this one file.
+- New API routes → a new file in `app/backend/routes/`, one file per resource, mounted from `main.py` under the `/api` prefix. Every route on a session takes `Depends(get_current_session)`.
+- New agent behaviour → `app/backend/agent/`. Keep detection (`languages.py`), retrieval (`wiki/`), search (`search/`) and composition (`agent/pipeline.py`) as separate modules with the protocol seams `pipeline.py` defines.
+- New SSE event types → add the dataclass to `agent/events.py`, the encoder case to `routes/sessions.py`, the section to `docs/API.md`, and the decoder to `app/ios/VirtualAgent/Models.swift`, in the same PR.
+- New wiki formats → `app/backend/wiki/index.py` (`WIKI_EXTENSIONS` and `_read_documents`).
+- New constants and env vars → `app/backend/config.py` only.
+- New app screens or view models → `app/ios/VirtualAgent/`, one type per file, file named after the type.
+- New app network calls → `app/ios/VirtualAgent/AgentAPI.swift` only. New SSE parsing → `SSEParser.swift` only. New user-facing strings → `Phrases.swift`, in all four languages.
+- New wiki content → `virtualagent/resources/`. That is the only authoring surface; there is no upload path.
 
 ---
 
-## Running the App
-
-Install and start everything (backend venv + deps, frontend deps, both dev servers):
+## Running the Service
 
 ```bash
-cd app
-./start.sh         # POSIX
-start.bat          # Windows
+cd app/backend && uv sync --all-extras
 ```
-
-Manual backend:
 
 ```bash
-cd app/backend
-uv sync --all-extras                   # creates backend/.venv, installs runtime + dev deps
-cd ..
-uv --project backend run uvicorn backend.main:app --reload --port 8000
+cd app && uv --project backend run uvicorn backend.main:app --reload --port 8000
 ```
 
-Backend **must** be run from `app/` (not `app/backend/`) — the `backend.main:app` import path requires it. Running from the wrong cwd gives `ModuleNotFoundError: No module named 'backend'`. The `--project backend` flag tells uv to use `app/backend/.venv` while cwd is `app/`.
+The service **must** be run from `app/` (not `app/backend/`): the `backend.main:app` import path requires it. Running from the wrong cwd gives `ModuleNotFoundError: No module named 'backend'`. The `--project backend` flag tells uv to use `app/backend/.venv` while cwd is `app/`.
 
-Manual frontend:
+Configuration is read from `app/.env` (gitignored; template at `app/backend/.env.example`) or the environment. `OPENROUTER_API_KEY` is required: the service refuses to import without it. Startup indexes the wiki, which calls the embeddings endpoint, so a bad key fails at boot rather than on the first turn. That is deliberate.
 
-```bash
-cd app/frontend
-bun install
-bun run dev           # dev server with HMR
-bun run build         # production build → dist/
-bun run preview       # serve built assets
-```
+To run without secrets or network, use the harness: `python harness/serve.py --port 8000` starts stub providers and points the service at them and at `harness/fixtures/wiki`.
 
 ---
 
 ## Testing
 
-**Current state: no tests exist yet.** When you add them, use the tools below. The factory's agent-browser regression test (see FACTORY_RULES.md §4) is a separate end-to-end gate and does not replace unit/integration tests.
-
-**Python backend:**
+**Service:**
 
 ```bash
 cd app/backend
 uv run pytest tests -xvs
 ```
 
-All backend tool invocations run from `app/backend/` so that `pyproject.toml` (which holds ruff, mypy, pytest config) is picked up. Running the tools from `app/` with `--project backend` works for package resolution but mypy/pytest **do not** auto-discover config from a non-cwd project, so you'd silently lose the exclude lists and asyncio mode.
+All backend tool invocations run from `app/backend/` so `pyproject.toml` (ruff, mypy, pytest config) is picked up.
 
-- Test directory: `app/backend/tests/` (already exists with skeleton `__init__.py` + `conftest.py`)
-- `pytest`, `pytest-asyncio`, and `httpx` are declared in `backend/pyproject.toml` under `[project.optional-dependencies].dev` — installed by `uv sync --all-extras`
-- Use `pytest-asyncio` for async tests (`asyncio_mode = "auto"` is set in `pyproject.toml`, so plain `async def` test functions work)
-- Use `httpx.AsyncClient` against a test FastAPI app for integration tests
-- SQLite tests use a separate temp database; never touch `app/backend/data/chat.db`
+- `asyncio_mode = "auto"`: plain `async def` tests work.
+- **Fakes sit at the provider boundary, never above it.** `conftest.py` provides `FakeLLM` (scripted replies, deterministic bag-of-words embeddings), `SpySearch` (records queries) and a `client` fixture that wires them into the real app over `httpx.ASGITransport`. The pipeline, the routes and the wiki index under test are the real ones. Do not mock `Agent`, `WikiIndex` or the routes.
+- The test wiki is `tests/fixtures/wiki/`. Tests that need a specific document create a temp folder; do not add tests that depend on `virtualagent/resources/`.
+- **Never hit the network from a test.** Use `respx` for httpx clients and the fakes for the model.
+- Every bug fix ships a regression test that fails on `main` and passes on the branch. Every feature ships tests for its behaviour.
 
-**TypeScript frontend:**
+**App:** `VirtualAgentTests` is an XCTest target run from Xcode on a Mac (`Cmd+U`). The factory's machines have no Swift toolchain; `harness/static_ios.py` checks the manifests and the Swift files' balance only, and says so. A change to the app is verified by a person.
+
+**The gate:**
 
 ```bash
-cd app/frontend
-bun add -D vitest @testing-library/react @testing-library/jest-dom jsdom
-bun run test
+python harness/ci.py --quick   # static + unit
+python harness/ci.py           # the whole gate: + the API journey against a live process, the holdout, the mutation set
 ```
 
-- Test directory: `app/frontend/src/__tests__/` or co-located `*.test.tsx` files
-- Use Vitest (not Jest — Vite-native, faster)
-- Mock `fetch` with `vi.stubGlobal('fetch', ...)` for hook tests
+`python` must be a real 3.11 interpreter on PATH (on Windows the Store stub that prints "Python est introuvable" is not one). The full gate needs `uv` and nothing else: no secrets, no network.
 
 ---
 
 ## Lint, Format, Type Check
 
-**Backend tooling is configured in `app/backend/pyproject.toml`:** ruff (lint + format, line-length 100, target py311, conservative rule set — E/F/W/I/B/UP/SIM/RUF), mypy (lenient `strict = false`, `warn_return_any = true`, `ignore_missing_imports = true`), pytest (asyncio auto mode). All three are in the `dev` optional-dependency group and installed by `uv sync --all-extras`.
-
-**Python:**
-
 ```bash
 cd app/backend
 uv run ruff check .
@@ -183,311 +155,140 @@ uv run ruff format --check .
 uv run mypy .
 ```
 
-**TypeScript:** `eslint` + `prettier` or the combined `biome`. Prefer `biome` (one tool, fast).
+Configured in `app/backend/pyproject.toml`: ruff line-length 100, target py311, rules E/F/W/I/B/UP/SIM/RUF (RUF001-003 ignored: the product speaks Arabic and its letters are not confusables); mypy lenient (`strict = false`, `warn_return_any = true`, `ignore_missing_imports = true`).
 
-```bash
-cd app/frontend
-bun x biome check src
-bun x biome format --write src
-bun run tsc --noEmit           # type check
-```
-
-**Before every commit (what the validator runs):**
-
-```bash
-# Backend (from app/backend/)
-cd app/backend
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy .
-uv run pytest tests -xvs
-cd ../..
-
-# Frontend
-cd app/frontend
-bun run tsc --noEmit
-bun x biome check src
-bun run test
-```
+**Before every commit (what the validator runs):** `python harness/ci.py --quick`, and the full gate before requesting review.
 
 ---
 
 ## Code Conventions
 
-### Python (backend)
+### Python (service)
 
-- **Async everywhere.** FastAPI routes are `async def`. Database calls use `asyncpg` via a connection pool. Any sync blocking call (file I/O, CPU work) in a route handler is a bug — use `asyncio.to_thread` or move it to a background task.
-- **Imports:** stdlib first, third-party second, local third. Group with blank lines. No wildcard imports.
-- **Type hints:** use them on every function signature and return type. Use `list[str]` / `dict[str, int]` syntax (Python 3.9+), not `List` / `Dict` from `typing`.
-- **No `print()` in runtime code.** Use `logging` with a module-level logger: `logger = logging.getLogger(__name__)`. `print()` is acceptable in `data/seed.py` and one-off scripts.
-- **Errors:** raise specific exceptions (`ValueError`, `KeyError`, custom) with clear messages. Never `except:` bare. Avoid `except Exception` except at the outermost request handler, where FastAPI's exception handlers take over.
-- **SQL:** all queries live in `db/repository.py`. Parameterize — never use f-strings or `%` formatting to build SQL. `aiosqlite` uses `?` placeholders.
-- **Config:** every environment variable is read exactly once in `config.py` and exposed as a module-level constant. Routes and services import the constant, never `os.environ` directly.
-- **Pydantic models:** use `pydantic.BaseModel` for request/response schemas, defined in the route file that uses them (unless shared).
+- **Async everywhere.** Routes are `async def`. Provider calls are awaited. Any sync blocking call in a request path is a bug; use `asyncio.to_thread` or do it at startup.
+- **Imports:** stdlib, third-party, local, separated by blank lines. No wildcard imports. `from __future__ import annotations` at the top of every module.
+- **Type hints** on every signature and return. `list[str]`, `dict[str, int]`, `X | None`; never `List`, `Optional`.
+- **No `print()` in runtime code.** Module-level `logger = logging.getLogger(__name__)`. `print()` is fine in `harness/` and `.factory/`, whose contract is stdout.
+- **Errors:** specific exceptions with clear messages. Never bare `except:`. `except Exception` only at the outermost boundary. A third-party failure mid-turn is logged and turned into "no results", never a 500: the agent must not crash mid-conversation.
+- **Config:** every env var is read once in `config.py` and imported as a constant. Nothing else touches `os.environ`.
+- **Pydantic models** for request bodies, defined in the route file that uses them.
+- **Protocols at the seams.** `agent/pipeline.py` defines `ChatModel`, `WikiSearch` and `WebSearch` as `typing.Protocol`. New providers and fakes implement those; nothing imports a concrete client into the pipeline.
+- **The wire format lives in one place.** Only `routes/sessions.py` encodes SSE. Only `agent/events.py` defines events.
+- **Everything the agent says is spoken.** Fixed phrases (greetings, the no-answer phrase, the ask-for-a-language question) live in `languages.py`, per language, and are plain spoken prose: no markdown, no URLs.
 
-### TypeScript (frontend)
+### Swift (app)
 
-- **Function components only.** No class components. Named exports, one component per file. File name matches component name.
-- **Hooks for state and effects.** Custom hooks live in `src/hooks/`, prefixed `use`, returning a typed object.
-- **All API calls go through `src/lib/api.ts`.** Components and hooks import from there. Never `fetch()` inline in a component.
-- **Types:** every function signature typed; no `any` except when bridging an untyped dependency with a clear comment explaining why. Prefer `interface` for object shapes, `type` for unions and aliases.
-- **Imports:** use relative paths within `src/` (no path aliases configured currently). External libraries first, then internal.
-- **Styling:** Tailwind utility classes only. No inline `style={{...}}` except for dynamic values that can't be expressed in Tailwind. No CSS modules, no styled-components.
-- **Event handlers:** typed callbacks (`(e: React.ChangeEvent<HTMLInputElement>) => void`), not `any`.
-- **State:** React built-ins (`useState`, `useReducer`, Context) only. Do not add Redux, Zustand, Jotai, or any external state library — it's out of scope.
-- **SSE parsing:** all SSE consumption goes through `useStreamingResponse`. Do not parse SSE in components or new hooks.
-
----
-
-## Database
-
-**Current state:** Postgres via `asyncpg`. All tables (chat + auth) live in Postgres. Schema is managed by Alembic migrations. Connection pool initialised in the FastAPI lifespan handler via `db/postgres.py:get_pg_pool()`. No ORM. No SQLite.
-
-**Tables:** `users`, `user_messages`, `signup_attempts`, `videos`, `chunks` (FK → videos), `conversations`, `messages` (FK → conversations), `channel_sync_runs`, `channel_sync_videos` (FK → channel_sync_runs). All use `TIMESTAMPTZ` for timestamps. TEXT primary keys for chat tables (compatible with client-side IDs).
-
-**Alembic workflow:** All schema changes go through Alembic migrations. The initial migration (`0001_initial.py`) creates all tables. On startup, the app runs `alembic upgrade head` automatically in the lifespan handler.
-
-**Rules for database code:**
-1. All SQL lives in `db/repository.py` — parameterised, no f-string interpolation.
-2. Use `$1, $2, $3...` placeholders for asyncpg (not `?` as in aiosqlite).
-3. All timestamps stored as TIMESTAMPTZ via ISO 8601 strings parsed by Postgres.
-4. TEXT primary keys for chat tables (text UUIDs generated via `_new_id()`).
-5. UUID primary keys for auth tables (`gen_random_uuid()` in Postgres).
+- **SwiftUI, one type per file, file named after the type.** `@MainActor` on view models. Swift concurrency (`async`/`await`, `Task`) rather than callbacks.
+- **All network calls go through `AgentAPI.swift`;** all SSE parsing through `SSEParser.swift`; all speech input through `SpeechInput.swift`; all speech output through `SpeechOutput.swift`. Views never touch `URLSession` or `AVSpeechSynthesizer`.
+- **Every string the client sees or hears exists in all four languages** in `Phrases.swift`, keyed by the language code the service uses. No fifth language, no English-only fallback string outside `Phrases`.
+- **Voice locales come from the service** (`voice_locale` on `language` and `sentence` events); the app never maps a language to a locale itself.
+- **No third-party packages.** No `Package.swift` dependencies, no CocoaPods, no Carthage.
+- **`Codable` models in `Models.swift` mirror `docs/API.md` field for field.** Unknown enum values decode to a safe case; the app must not crash on a new event.
 
 ---
 
-## RAG Pipeline Invariants
+## The Contract That Must Not Regress
 
-These behaviors are part of DynaChat's contract and must not regress. The agent-browser regression test verifies most of them.
+These are the code-level shape of the MISSION.md hard invariants and the PRD's one adjective, "live". The gate (`harness/ci.py`), the holdout and the mutation set all probe them. Regressing any is an auto-reject.
 
-1. **Chunking** uses Docling `HybridChunker` with `max_tokens=512` (`HYBRID_CHUNKER_MAX_TOKENS` in `config.py`). Do not swap to recursive-character splitters or LangChain chunkers.
-2. **Embeddings** come from OpenRouter's `openai/text-embedding-3-small` (1536-dim). Never call a different embedding model or provider. Never embed on the frontend.
-3. **Retrieval** is in-process NumPy cosine similarity over all chunks, top-k = 5. This is acceptable until the library grows large. Do not introduce a vector database (FAISS, Chromo, pgvector) without an explicit issue authorizing it — that's an architectural change requiring human approval. **Exception (issue #59):** hybrid retrieval via Reciprocal Rank Fusion (RRF) combining Postgres tsvector keyword search with pgvector cosine similarity is authorized. See `app/backend/rag/retriever_hybrid.py`.
-4. **Chat completion** uses OpenRouter's `anthropic/claude-sonnet-4.6` via the `openai` SDK pointed at `https://openrouter.ai/api/v1`. Do not change the provider or the model in a PR — that's out of scope per MISSION.md.
-5. **Streaming format:** Server-Sent Events with JSON-encoded tokens. Each token is framed as `data: <json-string>\n\n`. The `sources` event is emitted as `event: sources\ndata: <json-array>\n\n` **before** the `data: [DONE]\n\n` terminator. Do not change this format — the frontend parser in `useStreamingResponse.ts` depends on it exactly.
-6. **Citations** must include video title, video URL, exact timestamp deep-link, and the quoted transcript snippet. The citation modal opens an embedded YouTube player at the timestamp. This is a MISSION.md quality bar — removing or regressing any of these fields is an auto-reject.
+1. **One definition of the language set.** `SUPPORTED_LANGUAGES` in `languages.py` is exactly `{"fr", "en", "de", "ar"}`; `LANGUAGE_NAMES`, `VOICE_LOCALES`, `GREETINGS` and `NO_ANSWER_TEXTS` have exactly those keys. Detection returns `None` rather than guessing.
+2. **The order is code, not prompt.** `Agent.respond()` searches the wiki first, calls the web only when `is_confident()` is false or the model declined the excerpts, and says it does not know without consulting the model when both fail. The web is never called while the wiki has a confident answer.
+3. **Every turn declares a source** from `{"wiki", "web", "none"}` and a kind from `{"answer", "question", "no_answer"}`. The model is never asked to answer from nothing.
+4. **Every `/api/sessions/{session_id}/...` route depends on `get_current_session`.** 401 without a token, 404 unknown session, 403 wrong token, in that order.
+5. **The cap is `DAILY_TURN_CAP = 100` over `WINDOW_HOURS = 24` in `rate_limit.py`** and is defined nowhere else. 429 carries `resets_at`.
+6. **OpenRouter is the only inference provider.** `anthropic/claude-sonnet-4.6` for chat (overridable by `CHAT_MODEL` for canaries only), `openai/text-embedding-3-small` for embeddings. No other provider, no local model.
+7. **The stream is live.** `sentence` events fire as each sentence completes, before the turn closes; the first sentence never waits for the last token. The SSE framing in `docs/API.md` is exact: tokens are unnamed `data:` frames carrying a JSON string, `language` comes first, `sources` and `turn` come before `data: [DONE]`. The app's parser depends on it.
 
 ---
 
 ## Environment Variables
 
-All env var reads happen in `app/backend/config.py`. Add new variables there and import the constant elsewhere.
+All env var reads happen in `app/backend/config.py`.
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `OPENROUTER_API_KEY` | **yes** | Authenticates embeddings and chat completions to OpenRouter |
-| `SUPADATA_API_KEY` | prod (YouTube ingestion) | Fetches YouTube transcripts via Supadata. Required for channel sync and manual ingestion |
-| `YOUTUBE_CHANNEL_ID` | prod (channel sync) | YouTube channel ID/handle to sync videos from via `POST /api/channels/sync` |
-| `CHANNEL_SYNC_TYPE` | prod (channel sync) | Content type filter for channel sync: `all`, `video`, `short`, `live`. Default: `video` |
-| `DATABASE_URL` | **yes** (prod + dev) | Postgres connection string. Shape: `postgresql://dynachat:<pw>@127.0.0.1:5433/dynachat`. The app refuses to start if this is unset (no SQLite fallback). |
-| `CORS_ORIGINS` | No (dev default) | Comma-separated list of allowed CORS origins. Defaults to `http://localhost:{FRONTEND_PORT},http://127.0.0.1:{FRONTEND_PORT}`. Used in `app.add_middleware(CORSMiddleware, allow_origins=CORS_ORIGINS)` in `main.py`. |
-| `CATALOG_ENABLED` | No (default: `false`) | Injects a video-catalog block into the system prompt to enable Anthropic prompt caching. Accepted values: `1`, `true`, `yes`, `on`. Adds input tokens on every request (even cache hits). |
-| `CATALOG_TIER` | No (default: `standard`) | Cache tier: `standard` = ~5-min ephemeral; `extended` = 1-hour TTL (3600 s). Ignored when `CATALOG_ENABLED` is false. |
+| `OPENROUTER_API_KEY` | **yes** | Chat completions and embeddings. The service refuses to start without it |
+| `OPENROUTER_BASE_URL` | no | Default `https://openrouter.ai/api/v1`. The harness points it at the stub |
+| `CHAT_MODEL` | no | Default `anthropic/claude-sonnet-4.6`. For canarying a model on the inactive colour only |
+| `BRAVE_SEARCH_API_KEY` | no | The web fallback. Unset: the agent says it does not know when the wiki has nothing; `/api/health` reports `web_search: unconfigured` |
+| `WEB_SEARCH_BASE_URL` | no | Default `https://api.search.brave.com/res/v1`. The harness points it at the stub |
+| `WIKI_RESOURCES_DIR` | no | Default `<repo>/virtualagent/resources`. The image pins `/app/virtualagent/resources`; the harness points it at its fixture wiki |
+| `CORS_ORIGINS` | no | Comma-separated browser origins. The iOS app needs none |
 
-Everything else is currently hardcoded in `config.py` (model names, ports, chunk size, top-k). When adding configurability, add the constant to `config.py` with a sensible default:
-
-```python
-NEW_CONSTANT: int = int(os.environ.get("NEW_CONSTANT", "42"))
-```
-
-**Never commit `.env` files.** `.env`, `.env.*`, and `.archon/config.yaml` are in `.gitignore` and on the protected files list in `FACTORY_RULES.md`.
+Everything else is a constant in `config.py` (top-k, the confidence tolerances, session TTL, history length). When adding configurability, add the constant there with a sensible default. **Never commit `.env` files.**
 
 ---
 
 ## Deployment
 
-**DynaChat ships via Docker Compose to a Digital Ocean VPS at `chat.dynamous.ai`.** Source of truth for the compose stack lives in this repo at `deploy/` (committed, readable to the factory). The real `.env` lives **only** on the prod host at `/opt/dynachat/.env` (root-owned, mode 600) and is never in git, never in an LLM context, and never readable by the factory's `archon` user without `sudo`.
+The service ships via Docker Compose to a VPS, blue/green behind Caddy. Source of truth is `deploy/`; the runbook is `deploy/README.md`. The real `.env` lives only on the host at `/opt/virtualagent/.env` and is never in git or in an LLM context.
 
-### Production host layout
+- `deploy/Dockerfile` builds one image: the service plus a copy of `virtualagent/resources/`. **The wiki deploys like code**: a document merged to `main` is a new image on the inactive colour, a healthcheck that only passes once the wiki is indexed, and a Caddy flip.
+- `app-blue` and `app-green` are identical except for name; neither publishes a host port; `deploy/upstream.conf` (gitignored, written by `deploy.sh`) names the live one.
+- `deploy.sh` runs from a systemd timer on the host and is mirrored by hand; the copy here is the source of truth.
+- Zero downtime is a hard requirement. Any change under `deploy/` must keep both colours, the healthcheck, the internal-only ports and the `import /etc/caddy/upstream.conf` line.
 
-```
-/opt/dynachat/                     # root:root 700
-├── .env                           # root:root 600 — real secrets, never committed
-└── app/                           # git clone of this repo
-    └── deploy/
-        ├── docker-compose.yml     # Caddy + Postgres (+ app service, TODO)
-        ├── Caddyfile              # TLS + subdomain routing
-        ├── .env.example           # placeholder template (committed)
-        └── README.md              # first-time-setup runbook
-```
-
-The factory runs as user `archon` on the same VPS but in a different directory (`/home/archon/...`). `archon` has passwordless sudo by design — accepted trust tradeoff. The factory should never need to touch `/opt/dynachat/.env` directly; if a new secret is required, the workflow tells Cole to add it to the prod `.env` out-of-band.
-
-### Services (via `deploy/docker-compose.yml`)
-
-| Service | Image | Port | Purpose |
-|---|---|---|---|
-| `dynachat-caddy` | `caddy:2.8-alpine` | `80`, `443` | TLS termination + reverse proxy. Auto-provisions Let's Encrypt cert on first request |
-| `dynachat-postgres` | `pgvector/pgvector:pg16` | `127.0.0.1:5433` | Primary database (loopback-only; no public exposure) |
-| **TODO:** `dynachat-app` | (app Dockerfile, not yet built) | internal | Will serve FastAPI on `:8000` and frontend static bundle. Caddy already routes to these ports via `host.docker.internal` — the app service just needs to bind them |
-
-### Caddy routing (`deploy/Caddyfile`)
-
-```
-chat.dynamous.ai {
-    handle /api/*  { reverse_proxy host.docker.internal:8000 }
-    handle         { reverse_proxy host.docker.internal:5173 }
-}
-```
-
-Backend on 8000, frontend on 5173 (Vite dev). Once the app has a Dockerfile and a production static build, the frontend route swaps to serving built assets — the Caddyfile updates accordingly, but the split remains `/api/*` → backend, everything else → frontend.
-
-### What the factory is authorized to do in `deploy/`
-
-The "Don't modify Dockerfiles, deployment configs" rule in the Don'ts list has one explicit exception: **when an issue asks for deployment work** (app Dockerfile, docker-compose additions, Caddy route changes), the factory may modify files inside `deploy/` and add a root-level `Dockerfile` for the app service. Anything touching `.env` or real secrets is still off-limits.
-
-### YouTube ingestion on the VPS
-
-Production transcript fetching uses **Supadata** (`SUPADATA_API_KEY`), not `youtube-transcript-api`. Digital Ocean IPs are blocked by YouTube's scraping defenses, which breaks `youtube-transcript-api` in prod. Supadata sits behind a managed residential proxy pool and is the only reliable option.
-
-**Supadata client rules:**
-1. Always pass the `lang` parameter (Supadata has a known bug where non-English-only videos 500 without it — pass `lang="en"` if you only need English, or iterate through available languages).
-2. Handle rate limits gracefully — Supadata's free tier is generous but not infinite. Back off on 429.
-3. The API key is read from `SUPADATA_API_KEY` in `config.py`; never inline the key anywhere.
-
-### Testing external APIs (Supadata, OpenRouter, anything else with a secret)
-
-**The factory does not have production API keys and will not get them.** Any PR that adds or modifies an external-API integration must ship with **mocked-boundary tests**, not live-key tests. Pattern:
-
-1. Record real responses once (you, locally, with your key) into `app/backend/tests/fixtures/<service>/<scenario>.json`. Check the fixtures into git — they're public, non-sensitive transcripts/metadata.
-2. In tests, use `httpx.MockTransport` or `respx` (for httpx-based clients) or `pytest` `monkeypatch` to short-circuit the HTTP client and return the fixture. Never hit the real API from a test.
-3. Cover the happy path, a rate-limit (429), a transient 5xx, and any service-specific quirks (for Supadata: the missing-`lang` 500 case).
-4. If a test needs a secret value to exist in `os.environ`, set it in `conftest.py` with a fake value like `"test-supadata-key"`. Never read from a real `.env`.
-
-**PR acceptance for external-API work requires a "Manual smoke-test" section in the PR body** listing exactly what a human will run on the prod host after merge. Example:
-
-```
-## Manual smoke-test (post-merge)
-On /opt/dynachat host:
-1. `curl -X POST https://chat.dynamous.ai/api/ingest -d '{"video_id": "dQw4w9WgXcQ"}'`
-2. Confirm transcript lands in `chunks` table: `psql -U dynachat -c 'SELECT count(*) FROM chunks WHERE video_id = ...'`
-3. Ask a question about the ingested video in the chat UI; verify citations deep-link correctly
-```
-
-This is the sole place where production-only verification happens. The factory is never the entity running that smoke-test.
-
-### Testing against the snapshot database
-
-For tests that genuinely need realistic data volume (retrieval quality, query plan behavior, schema migrations), the factory has access to a **snapshot database** — not the live one. Architecture:
-
-- **Live DB:** `dynachat` on `127.0.0.1:5433`. App-only. Role `factory_user` has zero privileges on this database (no direct grant, no PUBLIC grant).
-- **Snapshot DB:** `dynachat_factory` on the same Postgres instance, refreshed nightly at 03:00 UTC from `pg_dump dynachat | pg_restore`. Role `factory_user` has full read-write on this database — drop tables, bulk-insert, run destructive migrations, whatever. Next refresh heals any damage.
-
-The factory's connection string lives in `/home/archon/.dynachat-factory.env` (readable only by the `archon` user, mode 600):
-
-```
-DATABASE_URL=postgresql://factory_user:<password>@127.0.0.1:5433/dynachat_factory
-```
-
-When a factory workflow runs integration tests that need real-shaped data, it sources this env file and the app connects through `config.py` as usual — no code change needed, just a different `DATABASE_URL` at runtime.
-
-**Rules for factory use of the snapshot DB:**
-1. **Never override the URL to point at `dynachat`.** Postgres-level ACL blocks this anyway, but don't try.
-2. **The snapshot is up to 24h stale.** If a test needs today's newly-ingested video, it belongs in a manual smoke-test, not an automated integration test.
-3. **The refresh is managed by systemd** (`dynachat-factory-snapshot.timer` on the VPS). The factory should not invoke it — if a fresher snapshot is needed, ask a human to `sudo systemctl start dynachat-factory-snapshot.service`.
-4. **Unit tests still use fixtures** — see "Testing external APIs" above. The snapshot DB is for the integration tier only, where volume matters.
-
-### Redeploy flow — blue/green, automatic
-
-Deploy is pull-based and **fully automated**. On the prod VPS, a systemd timer (`dynachat-deploy.timer`) runs `/opt/dynachat/deploy.sh` every 10 minutes. The script:
-
-1. `git fetch`es `/opt/dynachat/app`; if `HEAD == origin/main`, no-op
-2. Otherwise `git pull`, then blue/green swap:
-   - Reads active color from `deploy/upstream.conf` (content: `reverse_proxy app-blue:8000` or `app-green:8000`)
-   - Builds + starts the **inactive** color (`docker compose up -d --build --no-deps app-<inactive>`)
-   - Polls `docker inspect ... Health.Status` for up to 90s
-   - If inactive never goes healthy: abort, stop the failed container, keep active serving. Deploy fails loudly in the systemd journal.
-   - If healthy: rewrite `upstream.conf`, `docker compose exec caddy caddy reload` (Caddy reload is graceful — no dropped connections), sleep 5s (drain), stop the old color
-
-The factory's contract with prod is narrow: **merge a green PR to main, the VPS handles rollout within 10 minutes.** There is no CI deploy step, no webhook, no GitHub Action.
-
-### What the factory must never do
-
-The deploy infrastructure (`/opt/dynachat/deploy.sh`, `/etc/systemd/system/dynachat-deploy.*`, `/opt/dynachat/.env`, `/var/log/dynachat-deploy.log`) is **not in this repo** and must not be touched by the factory. If an issue seems to require editing systemd, cron, secrets, or the deploy script itself, that's a sign the issue is scoped wrong — file a clarification rather than inventing deploy infra inside the repo.
-
-The factory's lane, summarized:
-- **Inside the repo, inside the PR** → fair game (code, tests, docs, `deploy/Dockerfile`, `deploy/docker-compose.yml`, `deploy/Caddyfile`, `deploy/upstream.conf`)
-- **Outside the repo** → off-limits (VPS state, secrets, systemd units, server processes)
-
-### Zero-downtime is a hard requirement
-
-Production must never 502 during a deploy. That's why blue/green exists. Any change to `deploy/` must preserve this property:
-
-- Both `app-blue` and `app-green` services must be defined in `docker-compose.yml` with identical config except for `container_name`
-- Each must have a `HEALTHCHECK` that only succeeds when the app is ready to serve traffic (not just "process started")
-- Neither publishes its port to the host — Caddy reaches them via the internal docker network by service name
-- `deploy/upstream.conf` is the single source of truth for which color is live. The deploy script rewrites it; the committed version should pin `app-blue`.
-- `Caddyfile` must contain `import /etc/caddy/upstream.conf` (and the caddy service must mount that file read-only)
-
-If a PR breaks any of the above, the deploy script will either refuse to swap (bad) or swap to an unhealthy container (very bad). Validate locally with `docker compose --env-file /opt/dynachat/.env -f deploy/docker-compose.yml config` before requesting review.
+The factory's lane: inside the repo, inside the PR. `deploy/` is protected (FACTORY_RULES.md §5); deployment work is human-authored. If an issue needs a new secret, the workflow says so and a human adds it to the host's `.env`.
 
 ---
 
-## Known Footguns (Fix These When You Touch Them)
+## Known Footguns
 
-These are existing bugs / quirks in the repo. They are fair game for the factory to fix when an issue is filed, but be aware of them so you don't accidentally depend on the broken behavior:
-
-1. **Port mismatch in `vite.config.ts`.** The dev server listens on port 5175 (`vite.config.ts`) but `config.py` reports `FRONTEND_PORT = 5173`. The API proxy target in `vite.config.ts` is also wrong — it points at port 8001 while the backend runs on 8000. If you touch `vite.config.ts` or `config.py`, fix both to agree.
-2. **Backend venv is committed to git.** `app/backend/venv/` should be in `.gitignore` but isn't. Do not remove it in an unrelated PR — file a separate issue. (The factory's implementation rules forbid "improvements" beyond the issue scope.) Note: the new uv-managed venv lives at `app/backend/.venv/` (dotted) and IS gitignored; only the legacy `app/backend/venv/` (no dot) remains checked in and should be cleaned up in a dedicated PR.
-3. **Runtime dependencies are unpinned in `pyproject.toml`** but pinned in `uv.lock`. Do not add upper bounds to `[project].dependencies` in an unrelated PR — uv's lockfile handles reproducibility already.
-4. **No `.env.example`** exists. When authorized, create one listing every variable from `config.py` with placeholder values and comments.
-5. **SSE tokens are JSON-encoded** (wrapped in quotes, escaped newlines). This is non-standard but intentional — it safely handles tokens containing newlines. The parser in `useStreamingResponse.ts` expects this exact format. Do not switch to raw-text SSE without updating both sides.
+1. **Sessions and the turn counter are in process.** Run one uvicorn worker. A restart forgets every session (the PRD lists durability as not-yet); two workers would each count half the turns.
+2. **Language detection is a heuristic.** Arabic by script; the three Latin-script languages by function words. A very short utterance with no function word ("Horaires ?") detects as nothing, and on a fresh session the agent asks for a language. That is the designed behaviour, and improving detection within the four languages is an allowed evolution.
+3. **The sentence splitter splits on `.` followed by whitespace.** "e.g. this" becomes two sentences. "9.30" survives. Known, documented in `sentences.py`.
+4. **The app has never been compiled.** It was written without a Mac. Expect API-availability and concurrency diagnostics on the first build; `app/ios/README.md` says exactly what has not been verified.
+5. **On Windows, `python` may be the Store stub.** The harness scripts call `python`; put a real 3.11 first on PATH or the gate exits before it starts, with a message about the Microsoft Store.
+6. **`harness/mutations/run.py` mutates in place and restores with git.** It refuses a dirty tree. If it is killed mid-defect, `git status` shows one modified file; `git checkout -- <file>` is the fix.
 
 ---
 
 ## Commit and PR Conventions
 
-- **Commit messages:** conventional commits style — `feat:`, `fix:`, `chore:`, `refactor:`, `docs:`, `test:`. Subject line under 72 characters. Body explains *why*, not *what*.
-- **PR title:** same conventional-commits prefix as the first commit. Under 72 characters.
-- **PR body:** must include `Fixes #N` (or `Closes #N` / `Resolves #N`) on its own line so the validator can extract the linked issue. Missing this link causes validation to fail at behavioral-validation.
-- **New dependencies:** PR body must include a "Dependencies" section explaining what the dependency does, why existing dependencies don't work, and evidence of active maintenance. See FACTORY_RULES.md §2.
-- **One issue per PR.** Do not bundle unrelated fixes. If you notice a bug while working on something else, file a new issue rather than fixing it in the current PR.
+- **Commit messages:** conventional commits - `feat:`, `fix:`, `chore:`, `refactor:`, `docs:`, `test:`. Subject under 72 characters. Body explains *why*.
+- **PR title:** same prefix as the first commit, under 72 characters.
+- **PR body:** must include `Fixes #N` (or `Closes #N` / `Resolves #N`) on its own line. Missing this fails validation.
+- **New dependencies:** PR body must include a "Dependencies" section: what it does, why existing dependencies do not work, evidence of maintenance. See FACTORY_RULES.md §2.
+- **One issue per PR.** File a new issue for anything else you notice.
+- **A change to `docs/API.md` and a change to the app's models travel together.** The contract has two consumers.
 
 ---
 
-## Dos and Don'ts (Quick Reference)
+## Dos and Don'ts
 
 **Do:**
-- Read MISSION.md and FACTORY_RULES.md before starting any non-trivial task
-- Run the full validation suite (tests, lint, typecheck, agent-browser regression) before declaring a PR done
-- Keep all SQL in `db/repository.py`
-- Keep all fetch calls in `src/lib/api.ts`
-- Use portable SQL only (Postgres migration is coming)
-- Add tests for every bug fix (regression test) and every new feature
+- Read MISSION.md and FACTORY_RULES.md before any non-trivial task
+- Run `python harness/ci.py` before declaring a PR done
+- Keep the language set in `languages.py`, the cap in `rate_limit.py`, the token check in `auth.py`, the wire format in `routes/sessions.py`
+- Keep all app networking in `AgentAPI.swift` and all app strings in `Phrases.swift`
+- Add tests for every bug fix and every feature, with fakes at the provider boundary
 
 **Don't:**
-- Modify `MISSION.md`, `FACTORY_RULES.md`, or `CLAUDE.md` (this file) — see FACTORY_RULES.md §5
-- Modify `.github/` or any `.env*` file (real secrets live only on the prod host — see **Deployment**)
-- Touch `/opt/dynachat/` on the prod host, or try to read the production `.env` — that's the app's runtime concern, not the factory's
-- Modify `Dockerfile`s or files in `deploy/` **unless** the issue is explicitly about deployment work (app service, Caddy route, compose additions)
-- Introduce a new LLM provider, embedding model, or vector database
-- Add state management libraries to the frontend
-- Add an ORM to the backend
-- Write SQL outside `db/repository.py` or fetch calls outside `src/lib/api.ts`
-- Use SQLite-specific SQL functions — anything written today must work on Postgres tomorrow
-- "Improve" code that wasn't part of the issue you're fixing — scope discipline is enforced by the validator
+- Modify `MISSION.md`, `FACTORY_RULES.md`, or `CLAUDE.md` - see FACTORY_RULES.md §5
+- Modify `.github/`, `deploy/`, any `.env*`, `harness/`, or `.factory/`
+- Add a language, remove one, or alias one
+- Add an inference provider, change the embedding model, or add a local model
+- Call the web before the wiki, or answer without a declared source
+- Add a database, an ORM, accounts, or a second client
+- Add a third-party Swift package
+- Parse SSE anywhere but `SSEParser.swift` on the app or encode it anywhere but `routes/sessions.py` on the service
+- "Improve" code that was not part of the issue - scope discipline is enforced by the validator
 
 ---
 
 ## Protected paths (factory auto-rejects PRs touching these)
 
-The following files implement or gate security invariants from `MISSION.md` §10.
-Any PR touching them must be human-authored:
+The following implement or gate the hard invariants in `MISSION.md`. Any PR touching them must be human-authored:
 
-- `app/backend/auth/` (entire directory)
-- `app/backend/routes/auth.py`
-- `app/backend/routes/admin.py` — sole consumer of `get_current_admin`; auth-adjacent per FACTORY_RULES §5
-- `app/backend/routes/conversations.py` — implements MISSION §10 #3 (owner-only conversations)
-- `app/backend/routes/messages.py` — implements MISSION §10 #3 (owner-only conversations)
-- `app/backend/db/users_repo.py`
-- `app/backend/db/repository.py` — conversation/message `user_id` scoping functions specifically
-- `app/backend/main.py` — auth router registration and `Depends(get_current_user)` wiring
-- `app/backend/config.py` — `JWT_SECRET` / `DATABASE_URL` handling
-- CORS middleware configuration anywhere in the backend
-- `app/backend/rate_limit.py` — implements MISSION §10 invariant #1 (25 msg/user/24h cap, hardcoded)
-- `app/backend/db/user_messages_repo.py` — audit-table access for the rate-limit counter
-- `app/backend/routes/messages.py` — the rate-limit enforcement call site (also listed above for owner-only conversations)
-- `app/backend/signup_rate_limit.py` — signup abuse guard (1/IP/hr + 25 global/10min, hardcoded; see issue #54)
-- `app/backend/db/signup_attempts_repo.py` — audit-table access for the signup rate-limiter
-- `deploy/Dockerfile` — uvicorn `--proxy-headers --forwarded-allow-ips="*"` flags; signup IP trust boundary depends on these (see module docstring in `signup_rate_limit.py`)
-- `MISSION.md` §10 invariant #1 (the cap value itself — 25 is not configurable)
+- `app/backend/auth.py` - the session token check (MISSION invariant 4)
+- `app/backend/rate_limit.py` - the cap and its window (MISSION invariant 5)
+- `app/backend/languages.py` - the `SUPPORTED_LANGUAGES`, `LANGUAGE_NAMES` and `VOICE_LOCALES` definitions (MISSION invariant 1). Detection heuristics below them are an allowed evolution; a PR that changes those three names is not
+- `app/backend/agent/pipeline.py` - the order in `Agent.respond()` and the source assignment in `_compose()` (MISSION invariants 2 and 3). The confidence decision it calls, in `wiki/index.py`, is an allowed evolution
+- `app/backend/routes/sessions.py` - the `Depends(get_current_session)` on every session route and the 429 path
+- `app/backend/main.py` - router registration and CORS middleware
+- `app/backend/config.py` - the OpenRouter constants and `EMBEDDING_MODEL` (MISSION invariant 6)
+- `app/backend/llm/openrouter.py` - the only inference client
+- `deploy/**` - the blue/green stack; zero downtime depends on it
+- `harness/**` and `.factory/**` - the gate, the holdout, the mutation set, the ratchet, the decisions log. A builder that can edit its own judge can pass it
+- `scripts/factory-stop.sh` - the stop button
+- `MISSION.md`, `FACTORY_RULES.md`, `CLAUDE.md`, `.github/**`, `.env*`, `.archon/config.yaml`

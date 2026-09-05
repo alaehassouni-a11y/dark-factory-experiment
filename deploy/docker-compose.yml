@@ -1,8 +1,15 @@
 services:
   caddy:
     image: caddy:2.8-alpine
-    container_name: dynachat-caddy
+    container_name: virtualagent-caddy
     restart: unless-stopped
+    environment:
+      # Substituted into Caddyfile by Caddy at load ({$VIRTUALAGENT_HOST},
+      # {$LETSENCRYPT_EMAIL}). `:?` makes compose refuse to start with either
+      # unset, which is the loud failure; a committed placeholder hostname that
+      # routes nothing was the quiet one.
+      VIRTUALAGENT_HOST: ${VIRTUALAGENT_HOST:?set VIRTUALAGENT_HOST in the .env file - the public hostname Caddy serves}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL:?set LETSENCRYPT_EMAIL in the .env file - the Let's Encrypt contact address}
     ports:
       - "80:80"
       - "443:443"
@@ -11,78 +18,43 @@ services:
       - ./upstream.conf:/etc/caddy/upstream.conf:ro
       - caddy_data:/data
       - caddy_config:/config
-    # No extra_hosts — the app now lives in-network and is reachable by
-    # service name (app-blue / app-green). upstream.conf switches between them.
-
-  postgres:
-    image: pgvector/pgvector:pg16
-    container_name: dynachat-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    ports:
-      - "127.0.0.1:5433:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    # No extra_hosts — the app lives in-network and is reachable by service
+    # name (app-blue / app-green). upstream.conf switches between them.
 
   # ---- Blue/green app services --------------------------------------------
-  # Identical except for name. /opt/dynachat/deploy.sh rebuilds the inactive
-  # color, waits for its healthcheck, then rewrites upstream.conf and does a
-  # graceful `caddy reload` to swap. Neither publishes a host port — Caddy
-  # reaches them via the internal docker network by service name.
+  # Identical except for name. /opt/virtualagent/deploy.sh rebuilds the
+  # inactive color, waits for its healthcheck, then rewrites upstream.conf and
+  # does a graceful `caddy reload` to swap. Neither publishes a host port —
+  # Caddy reaches them via the internal docker network by service name.
+  #
+  # There is no database and no content volume. The service keeps sessions
+  # in-process (they expire after 24h) and the wiki is baked into the image,
+  # so a colour is fully described by its image + these environment variables.
   #
   app-blue:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: dynachat-app:latest
-    container_name: dynachat-app-blue
+    image: virtualagent-app:latest
+    container_name: virtualagent-app-blue
     restart: unless-stopped
     environment:
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
-      SUPADATA_API_KEY: ${SUPADATA_API_KEY:-}
-      YOUTUBE_CHANNEL_ID: ${YOUTUBE_CHANNEL_ID:-}
-      CHANNEL_SYNC_TYPE: ${CHANNEL_SYNC_TYPE:-video}
-      FRONTEND_DIST: /app/frontend/dist
-      # DATABASE_URL is now the sole database connection (no SQLite).
-      # Points at the in-compose postgres service by DNS name.
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      JWT_SECRET: ${JWT_SECRET}
-      ADMIN_USER_EMAIL: ${ADMIN_USER_EMAIL:-}
-      # Issue #147: Circle membership verification + Dynamous content ingest.
-      CIRCLE_ADMIN_TOKEN: ${CIRCLE_ADMIN_TOKEN:-}
-      CIRCLE_PAID_ACCESS_GROUP_ID: ${CIRCLE_PAID_ACCESS_GROUP_ID:-}
-      MEMBERSHIP_REFRESH_SECONDS: ${MEMBERSHIP_REFRESH_SECONDS:-3600}
-      DYNAMOUS_CONTENT_DIR: /app/content/dynamous
-      # Inject the video catalog into the cached system prompt so the LLM
-      # can map curriculum identifiers ("lesson 1.6", "module 7", "workshop
-      # #4") onto real video titles before retrieving. Default off so
-      # tighter prompt-cache budgets are unaffected; flip on per-deploy.
-      CATALOG_ENABLED: ${CATALOG_ENABLED:-false}
-      CATALOG_TIER: ${CATALOG_TIER:-standard}
-      CATALOG_CACHE_TTL_SECONDS: ${CATALOG_CACHE_TTL_SECONDS:-3600}
-      # OpenRouter chat model + optional reasoning effort override. Defaults
-      # match the prod baseline; canary deploys override these to test new
-      # models on the inactive blue/green slot before flipping Caddy.
+      # Required. OpenRouter is the only inference provider (chat + the
+      # embeddings that index the wiki). The service refuses to start without it.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in the .env file - the service refuses to start without it}
+      # Optional. Brave Search key for the web fallback. Unset means the agent
+      # says it does not know when the wiki has no confident answer.
+      BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY:-}
+      # The wiki copied into the image by deploy/Dockerfile. Fixed, not read
+      # from .env — a host-side path here would let the image and the wiki
+      # drift apart.
+      WIKI_RESOURCES_DIR: /app/virtualagent/resources
+      # Optional. Comma-separated browser origins. The iOS app needs none.
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # OpenRouter chat model override. Default matches the prod baseline;
+      # canary deploys override it to test a new model on the inactive
+      # blue/green slot before flipping Caddy.
       CHAT_MODEL: ${CHAT_MODEL:-anthropic/claude-sonnet-4.6}
-      LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-}
-    volumes:
-      # Read-only mount of the host-side dynamous-content checkout. The host's
-      # deploy.sh git-clones / pulls this directory before bringing the new
-      # color up. Path is parameterised so it can point at /opt/dynachat/dynamous-content
-      # in prod or a dev fixture in local testing. Empty/missing dir is fine —
-      # ingest_dynamous_content skips if the directory is absent.
-      - ${DYNAMOUS_CONTENT_HOST_PATH:-/opt/dynachat/dynamous-content}:/app/content/dynamous:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
       test:
         - "CMD"
@@ -98,42 +70,15 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: dynachat-app:latest
-    container_name: dynachat-app-green
+    image: virtualagent-app:latest
+    container_name: virtualagent-app-green
     restart: unless-stopped
     environment:
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
-      SUPADATA_API_KEY: ${SUPADATA_API_KEY:-}
-      YOUTUBE_CHANNEL_ID: ${YOUTUBE_CHANNEL_ID:-}
-      CHANNEL_SYNC_TYPE: ${CHANNEL_SYNC_TYPE:-video}
-      FRONTEND_DIST: /app/frontend/dist
-      # DATABASE_URL is now the sole database connection (no SQLite).
-      # Points at the in-compose postgres service by DNS name.
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      JWT_SECRET: ${JWT_SECRET}
-      ADMIN_USER_EMAIL: ${ADMIN_USER_EMAIL:-}
-      # Issue #147: Circle membership verification + Dynamous content ingest.
-      CIRCLE_ADMIN_TOKEN: ${CIRCLE_ADMIN_TOKEN:-}
-      CIRCLE_PAID_ACCESS_GROUP_ID: ${CIRCLE_PAID_ACCESS_GROUP_ID:-}
-      MEMBERSHIP_REFRESH_SECONDS: ${MEMBERSHIP_REFRESH_SECONDS:-3600}
-      DYNAMOUS_CONTENT_DIR: /app/content/dynamous
-      # Inject the video catalog into the cached system prompt so the LLM
-      # can map curriculum identifiers ("lesson 1.6", "module 7", "workshop
-      # #4") onto real video titles before retrieving. Default off so
-      # tighter prompt-cache budgets are unaffected; flip on per-deploy.
-      CATALOG_ENABLED: ${CATALOG_ENABLED:-false}
-      CATALOG_TIER: ${CATALOG_TIER:-standard}
-      CATALOG_CACHE_TTL_SECONDS: ${CATALOG_CACHE_TTL_SECONDS:-3600}
-      # OpenRouter chat model + optional reasoning effort override. Defaults
-      # match the prod baseline; canary deploys override these to test new
-      # models on the inactive blue/green slot before flipping Caddy.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in the .env file - the service refuses to start without it}
+      BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY:-}
+      WIKI_RESOURCES_DIR: /app/virtualagent/resources
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
       CHAT_MODEL: ${CHAT_MODEL:-anthropic/claude-sonnet-4.6}
-      LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-}
-    volumes:
-      - ${DYNAMOUS_CONTENT_HOST_PATH:-/opt/dynachat/dynamous-content}:/app/content/dynamous:ro
-    depends_on:
-      postgres:
-        condition: service_healthy
     healthcheck:
       test:
         - "CMD"
@@ -148,5 +93,3 @@ services:
 volumes:
   caddy_data:
   caddy_config:
-  postgres_data:
-  app_data:

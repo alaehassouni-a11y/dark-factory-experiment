@@ -12,13 +12,6 @@ build/
 .pytest_cache/
 .ruff_cache/
 
-# Database
-backend/data/chat.db
-backend/data/*.db
-
-# Node
-frontend/node_modules/
-
 # Environment
 .env
 *.env

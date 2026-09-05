@@ -94,3 +94,6 @@ config/secrets.yml
 # Factory run artifacts. Per-run scratch; the durable record is the PR and the issue.
 .factory/runs/
 .factory/locks-runtime/
+
+# Harness per-run state: the stub port serve.py hands to e2e.py. Never committed.
+harness/.run/

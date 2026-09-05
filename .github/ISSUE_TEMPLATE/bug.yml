@@ -1,5 +1,5 @@
 name: Bug report
-description: Report something broken in DynaChat
+description: Report something broken in the Virtual Agent
 title: "[Bug]: "
 labels: []
 body:
@@ -12,7 +12,7 @@ body:
     attributes:
       label: What happened?
       description: A clear, specific description of the buggy behavior.
-      placeholder: "When I click the citation for video X, the modal opens but the YouTube player is blank."
+      placeholder: "When I ask in German, the answer is spoken in English."
     validations:
       required: true
   - type: textarea
@@ -20,33 +20,34 @@ body:
     attributes:
       label: Expected behavior
       description: What should have happened instead?
+      placeholder: "The agent answers in the language I spoke, and the turn's source says where the answer came from (wiki, web, or none)."
     validations:
       required: true
   - type: textarea
     id: repro
     attributes:
       label: Steps to reproduce
-      description: Ordered list of steps. The factory's regression test must be able to reproduce this.
+      description: Ordered list of steps. The factory's regression test must be able to reproduce this against the API (POST /api/sessions, then POST /api/sessions/{id}/turns), so include the exact question and language.
       placeholder: |
-        1. Sign in with Google
-        2. Send the message "What is RAG?"
-        3. Click the first citation
-        4. Observe blank player
+        1. Open the app, tap the microphone, say "Wie lange dauert die Lieferung?"
+        2. Wait for the spoken answer
+        3. Observe the answer is spoken in English and the transcript shows source "web"
+        4. The wiki document "shipping.md" covers this question
     validations:
       required: true
   - type: textarea
     id: environment
     attributes:
       label: Environment
-      description: Browser, OS, and anything else relevant.
-      placeholder: "Chrome 147 on macOS 15"
+      description: iPhone model, iOS version, app version (Settings → About), and the language you spoke.
+      placeholder: "iPhone 15, iOS 19.1, app 0.1.0, German"
     validations:
       required: false
   - type: textarea
     id: logs
     attributes:
       label: Error messages or logs
-      description: Paste any error messages from the UI, browser console, or server logs.
+      description: Paste any error shown in the app, the session id and turn from the transcript, or lines from the server log (docker logs virtualagent-app-blue).
       render: shell
     validations:
       required: false

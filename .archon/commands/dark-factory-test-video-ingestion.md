@@ -1,9 +1,9 @@
 ---
-description: Comprehensive test scenario 2 - verify adding a YouTube video to the library works end-to-end.
-argument-hint: (no arguments - reads port files and health-before.json from $ARTIFACTS_DIR)
+description: Comprehensive test scenario 2 - wiki coverage. Verify the wiki loaded and that a wiki-covered question is answered from the wiki, naming the document it drew from.
+argument-hint: (no arguments - reads the port file from $ARTIFACTS_DIR)
 ---
 
-# Dark Factory Comprehensive Test — Video Ingestion
+# Dark Factory Comprehensive Test — Wiki Coverage
 
 **Workflow ID**: $WORKFLOW_ID
 
@@ -12,61 +12,74 @@ argument-hint: (no arguments - reads port files and health-before.json from $ART
 ## Your Role
 
 You are running scenario 2 of the Dark Factory comprehensive weekly test
-for DynaChat. Verify that adding a YouTube video to the library works
-end-to-end: ingestion completes and the backend's chunk count grows.
+for the Virtual Agent. Verify that the wiki is loaded and consulted: a
+question the wiki covers must be answered with turn source `wiki` and a
+`sources` list that names the document (MISSION hard invariants 2 and 3).
 
-You have Bash + agent-browser. Do NOT read source code.
-
----
-
-## Fixed Test Video (locked fixture, do NOT change)
-
-```
-https://www.youtube.com/watch?v=pjF-0dliYhg
-```
+You have Bash and drive the service with `curl` against `docs/API.md`.
+Do NOT read source code.
 
 ---
 
-## Running App URLs
+## Fixed Test Wiki (locked fixture, do NOT change)
 
-- Frontend: `http://127.0.0.1:$(cat $ARTIFACTS_DIR/.frontend-port)`
-- Backend:  `http://127.0.0.1:$(cat $ARTIFACTS_DIR/.backend-port)`
+The service was started by `harness/serve.py` against the harness fixture
+wiki, which contains opening hours in English and in French, and a returns
+policy. Any question about opening hours is wiki-covered.
 
-Baseline snapshot already captured at `$ARTIFACTS_DIR/health-before.json`
-(contains `video_count` + `chunk_count` from before any scenario ran).
+---
+
+## Running Service URL
+
+- Base: `http://127.0.0.1:$(cat $ARTIFACTS_DIR/.backend-port)`
 
 ---
 
 ## Steps
 
-1. `agent-browser open <frontend URL>`
-2. `agent-browser snapshot -i` - find the library / add-video surface.
-   If the app has a sidebar, navigation, or dedicated library page, go
-   there. If the video-add control is on the chat page, use it in place.
-   If you cannot find any way to add a video, that is a FAIL.
-3. Enter the test video URL into the add-video input and submit.
-4. Wait for ingestion to complete. This may take 30-90s for transcript
-   fetch + chunking + embedding. Poll the UI and also poll
-   `curl -sf http://127.0.0.1:<backend_port>/api/health` for up to 180s
-   until `chunk_count` increases above the baseline from
-   `health-before.json`.
-5. Screenshot the library/list view showing the ingested video to
-   `$ARTIFACTS_DIR/test-video-ingestion.png`
-6. Save the post-ingestion `/api/health` response to
-   `$ARTIFACTS_DIR/health-after-ingestion.json`
-7. `agent-browser close`
-8. Write a markdown summary to `$ARTIFACTS_DIR/test-video-ingestion.md`
-   including before/after chunk counts and screenshot path.
+1. Fetch `GET $BASE/api/health`, save it to
+   `$ARTIFACTS_DIR/test-video-ingestion-health.txt`, and assert
+   `"status":"ok"` and `wiki_documents >= 1`. A health body with
+   `wiki_documents: 0` is a FAIL - the wiki did not load.
+2. Open a session: `POST $BASE/api/sessions` with
+   `{"client_id":"weekly-scenario-2","language_hint":"en"}`; assert `201`
+   and capture `session_id` and `session_token`.
+3. Send a wiki-covered question and save the SSE body to
+   `$ARTIFACTS_DIR/test-video-ingestion-turn.txt`:
+   `POST $BASE/api/sessions/$SESSION_ID/turns` with the bearer token and
+   body `{"text":"What are your opening hours?"}`. Wait up to 60s for
+   `data: [DONE]`.
+4. Verify in the saved stream:
+   (a) status `200` and an `event: language` frame with `"language": "en"`;
+   (b) an `event: sources` frame whose data is a non-empty JSON array in
+       which every entry has `"kind": "wiki"` and a non-empty `location`
+       (a file path under the wiki folder, e.g. `opening-hours.md`);
+   (c) an `event: turn` frame with `"source": "wiki"` and
+       `"kind": "answer"`;
+   (d) at least one `event: sentence` frame before `event: turn`.
+5. Ask the same question in French on the same session
+   (`{"text":"Quels sont vos horaires d'ouverture ?"}`), save the stream to
+   `$ARTIFACTS_DIR/test-video-ingestion-turn-fr.txt`, and verify the
+   `language` event says `fr`, the `turn` source is still `wiki`, and the
+   `sources` entries still carry a `location`.
+6. `DELETE $BASE/api/sessions/$SESSION_ID` with the bearer token.
+7. Write a markdown summary to `$ARTIFACTS_DIR/test-video-ingestion.md`
+   including the health counts (`wiki_documents`, `wiki_chunks`), the
+   `sources` locations observed, and the evidence paths.
 
 ---
 
 ## Failure Criteria
 
 FAIL if any of:
-- No add-video control found
-- Ingestion UI shows an error
-- `chunk_count` did not increase within 180s
-- Test video does not appear in the library list
+- Health is not `ok` or reports `wiki_documents` below 1
+- The turn's `source` is anything other than `wiki` (a `web` or `none`
+  answer to a wiki-covered question means the wiki was not consulted
+  first)
+- The `sources` array is empty, or any entry lacks `kind: "wiki"` or a
+  `location`
+- No `sentence` event arrived before the `turn` event
+- The stream never reached `data: [DONE]` within 60s
 
 ---
 

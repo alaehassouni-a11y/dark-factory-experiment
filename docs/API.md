@@ -1,20 +1,23 @@
-# DynaChat API
+# Virtual Agent API
 
-DynaChat is a RAG-powered chat interface for querying YouTube channel content with streaming
-answers and per-chunk citations that deep-link to the exact timestamp in the source video.
+The service behind the iOS app. It detects the client's language, answers from the
+wiki or the web, and streams every agent turn as text plus ready-to-speak sentences so
+the app can speak while the answer is still being produced.
 
 **Base URL:** `http://localhost:8000` (development)
 
 ## Authentication
 
-All endpoints under `/api/` require a valid session cookie unless noted otherwise.
-Auth routes (`/api/auth/*`) are public and do not require a session.
+There are no accounts. A session is created anonymously and returns a **session
+token**; every later call on that session carries it as a bearer token. A request with
+no token gets `401`; a request with a token that belongs to a different session gets
+`403`. This is MISSION hard invariant 4.
 
-| Endpoint Group | Auth Required |
-|--------------|---------------|
-| `/api/auth/*` | No (public) |
-| `/api/health`, `/api/version` | No |
-| All other `/api/*` | Yes (session cookie) |
+| Endpoint | Token required |
+|---|---|
+| `GET /api/health`, `GET /api/version`, `GET /api/languages` | No |
+| `POST /api/sessions` | No (this call issues the token) |
+| Every other `/api/sessions/...` route | Yes (`Authorization: Bearer <session_token>`) |
 
 ---
 
@@ -22,576 +25,169 @@ Auth routes (`/api/auth/*`) are public and do not require a session.
 
 ### `GET /api/health`
 
-Health check. Returns database and video/chunk counts.
-
-**Auth:** None
+Reports that the service is up and that the wiki loaded.
 
 **Response `200`:**
 ```json
 {
   "status": "ok",
-  "video_count": 42,
-  "chunk_count": 1340,
-  "db_type": "postgres"
+  "wiki_documents": 3,
+  "wiki_chunks": 27,
+  "languages": ["ar", "de", "en", "fr"],
+  "web_search": "configured"
 }
 ```
 
----
+`web_search` is `"configured"` or `"unconfigured"`. When unconfigured, the fallback path
+produces `source: "none"` turns rather than failing.
 
 ### `GET /api/version`
 
-Returns the installed package version.
-
-**Auth:** None
-
-**Response `200`:**
 ```json
 { "version": "0.1.0" }
 ```
 
-**Response `503`** — package metadata unavailable.
+### `GET /api/languages`
 
----
+The supported set, with the voice locale the app should use for speech recognition and
+synthesis in each.
 
-## Conversations
-
-### `GET /api/conversations`
-
-List all conversations for the authenticated user, ordered newest first.
-
-**Auth:** Required
-
-**Response `200`:**
 ```json
 [
-  {
-    "id": "conv_abc123",
-    "user_id": "user_xyz",
-    "title": "Python Tips",
-    "created_at": "2026-03-01T10:00:00Z",
-    "updated_at": "2026-03-01T12:30:00Z"
-  }
+  { "code": "ar", "name": "Arabic",  "voice_locale": "ar-SA" },
+  { "code": "de", "name": "German",  "voice_locale": "de-DE" },
+  { "code": "en", "name": "English", "voice_locale": "en-US" },
+  { "code": "fr", "name": "French",  "voice_locale": "fr-FR" }
 ]
 ```
 
 ---
 
-### `POST /api/conversations`
+## Sessions
 
-Create a new empty conversation.
+### `POST /api/sessions`
 
-**Auth:** Required
+Open a session. The response carries the token and the agent's opening question.
 
-**Request body (optional):**
+**Request:**
 ```json
-{ "title": "My Conversation" }
+{
+  "client_id": "8B0F0C9A-5C1E-4D9A-9C2B-3E4F5A6B7C8D",
+  "language_hint": "fr"
+}
 ```
-If omitted, defaults to `"New Conversation"`.
+
+- `client_id` (required): an identifier the app generates once and keeps. The daily
+  turn cap is counted per `client_id`.
+- `language_hint` (optional): one of `ar`, `de`, `en`, `fr`. Used for the greeting only;
+  the session language is set by what the client actually says. Any other value is
+  `422`.
 
 **Response `201`:**
 ```json
 {
-  "id": "conv_abc123",
-  "user_id": "user_xyz",
-  "title": "New Conversation",
-  "created_at": "2026-03-01T10:00:00Z",
-  "updated_at": "2026-03-01T10:00:00Z"
-}
-```
-
----
-
-### `GET /api/conversations/search`
-
-Search conversations by title (case-insensitive substring match).
-
-**Auth:** Required
-
-**Query params:**
-| Param | Type | Description |
-|-------|------|-------------|
-| `q` | string | Search query (required) |
-
-**Response `200`:** Array of matching conversations (same shape as `GET /api/conversations`).
-
-> **Note:** This endpoint must be declared before `/conversations/{conv_id}` in the router
-> to avoid FastAPI matching "search" as a path parameter.
-
----
-
-### `GET /api/conversations/{conv_id}`
-
-Get a single conversation with all its messages.
-
-**Auth:** Required
-
-**Path params:**
-| Param | Type | Description |
-|-------|------|-------------|
-| `conv_id` | string | Conversation ID |
-
-**Response `200`:**
-```json
-{
-  "id": "conv_abc123",
-  "user_id": "user_xyz",
-  "title": "Python Tips",
-  "created_at": "2026-03-01T10:00:00Z",
-  "updated_at": "2026-03-01T12:30:00Z",
-  "messages": [
-    {
-      "id": "msg_001",
-      "conversation_id": "conv_abc123",
-      "role": "user",
-      "content": "How do I use decorators?",
-      "created_at": "2026-03-01T10:01:00Z"
-    },
-    {
-      "id": "msg_002",
-      "conversation_id": "conv_abc123",
-      "role": "assistant",
-      "content": "Decorators are functions that...",
-      "created_at": "2026-03-01T10:01:30Z"
-    }
-  ]
-}
-```
-
-**Response `404`** — conversation not found (or belongs to another user — returns 404 to avoid leaking existence).
-
----
-
-### `DELETE /api/conversations/{conv_id}`
-
-Delete a conversation and all its messages.
-
-**Auth:** Required
-
-**Path params:**
-| Param | Type | Description |
-|-------|------|-------------|
-| `conv_id` | string | Conversation ID |
-
-**Response `204`** — No content on success.
-
-**Response `404`** — conversation not found.
-
----
-
-### `PATCH /api/conversations/{conv_id}`
-
-Rename a conversation.
-
-**Auth:** Required
-
-**Path params:**
-| Param | Type | Description |
-|-------|------|-------------|
-| `conv_id` | string | Conversation ID |
-
-**Request body:**
-```json
-{ "title": "New Title" }
-```
-
-**Response `200`:** Updated conversation object (same shape as `GET /api/conversations/{conv_id}`).
-
-**Response `404`** — conversation not found.
-
----
-
-## Messages
-
-### `POST /api/conversations/{conv_id}/messages`
-
-Send a user message and receive a streaming RAG-grounded response via Server-Sent Events.
-
-**Auth:** Required
-
-**Path params:**
-| Param | Type | Description |
-|-------|------|-------------|
-| `conv_id` | string | Conversation ID |
-
-**Request body:**
-```json
-{ "content": "How does async/await work in Python?" }
-```
-
-**Response:** `StreamingResponse` with `Content-Type: text/event-stream`
-
-#### SSE Streaming Format
-
-The response uses **Server-Sent Events** with JSON-encoded tokens.
-
-**Content-Type:** `text/event-stream`
-
-**Event Types:**
-1. **Token events** (default) — JSON-encoded string tokens
-2. **`sources`** event — JSON array of citation objects (emitted before `[DONE]`)
-3. **`[DONE]`** — stream termination signal
-
-**Token Event Format:**
-```
-data: <json-encoded-token>\n\n
-```
-
-Example sequence:
-```
-data: "Decorators "\n\n
-data: "are "\n\n
-data: "functions "\n\n
-data: "that "\n\n
-...
-```
-
-Tokens are JSON-encoded strings (wrapped in quotes, escaped newlines) to safely handle
-special characters. Parse each token with `JSON.parse(data)`.
-
-**Sources Event Format:**
-```
-event: sources\n
-data: <json-array>\n\n
-```
-
-The `sources` event is emitted **before** the `[DONE]` terminator when RAG citations are available.
-
-Example sources array:
-```json
-[
-  {
-    "chunk_id": "chk_abc123",
-    "video_id": "vid_xyz",
-    "video_title": "Advanced Python Patterns",
-    "video_url": "https://www.youtube.com/watch?v=abc123xyz",
-    "start_seconds": 145.5,
-    "end_seconds": 162.3,
-    "snippet": "...decorators wrap a function to extend its behavior...",
-    "segment_count": 3
+  "session_id": "s_9f1c2e",
+  "session_token": "st_2c5b...",
+  "language": "fr",
+  "greeting": {
+    "text": "Bonjour, comment puis-je vous aider ?",
+    "language": "fr",
+    "voice_locale": "fr-FR"
   }
-]
-```
-
-`segment_count` — number of transcript chunks from the same video that were collapsed into this single citation entry. Always ≥ 1. The frontend displays "(N segments)" when this value is > 1.
-
-**`[DONE]` Terminator:**
-```
-data: [DONE]\n\n
-```
-
-**Full Example SSE Stream:**
-```
-data: "Decorators "\n\n
-data: "are "\n\n
-data: "functions "\n\n
-event: sources\n
-data: [{"chunk_id":"chk_abc","video_title":"Advanced Python","video_url":"https://www.youtube.com/watch?v=abc123","start_seconds":145,"end_seconds":162,"snippet":"Decorators are functions..."}]\n\n
-data: [DONE]\n\n
-```
-
-#### Error Responses
-
-| Status | Condition |
-|--------|-----------|
-| `400` | `content` is empty or whitespace-only |
-| `404` | Conversation not found (or belongs to another user) |
-| `429` | Rate limit exceeded (25 messages per 24 hours) |
-
-**Rate limit `429` response body:**
-```json
-{
-  "error": "rate_limit_exceeded",
-  "limit": 25,
-  "window_hours": 24,
-  "reset_at": "2026-03-02T10:00:00Z"
 }
 ```
 
----
+`language` is `null` when no hint was given; the greeting is then in English.
 
-## Videos
+### `POST /api/sessions/{session_id}/turns`
 
-### `GET /api/videos`
+Send what the client said and receive the agent's turn as a Server-Sent Events stream.
 
-List all ingested videos.
+**Request:**
+```json
+{ "text": "Quels sont vos horaires d'ouverture ?" }
+```
 
-**Auth:** Required
+**Response `200`, `Content-Type: text/event-stream`.** Events arrive in this order:
+
+```
+event: language
+data: {"language": "fr", "voice_locale": "fr-FR", "confidence": 0.6}
+
+data: "Nous "
+data: "sommes ouverts "
+data: "de 9h à 18h."
+
+event: sentence
+data: {"index": 0, "text": "Nous sommes ouverts de 9h à 18h.", "language": "fr", "voice_locale": "fr-FR"}
+
+event: sources
+data: [{"kind": "wiki", "title": "Opening hours", "location": "opening-hours.md", "snippet": "We are open 9:00-18:00 ..."}]
+
+event: turn
+data: {"kind": "answer", "source": "wiki", "language": "fr"}
+
+data: [DONE]
+```
+
+- **Token frames** are unnamed `data:` lines carrying a JSON-encoded string, so a token
+  containing a newline survives. Render them as they arrive.
+- **`sentence`** fires each time a complete sentence is available. Speak it immediately
+  with the given `voice_locale`; this is what makes the agent live. Sentences are
+  numbered from 0 within the turn.
+- **`language`** is the detected language for this turn and is emitted first. When the
+  client could not be understood as any supported language and the session has no
+  language yet, `language` is `null` and the turn is a question asking the client to
+  continue in a supported language, in English.
+- **`sources`** lists what the answer drew from. `kind` is `wiki` (with `location`, the
+  file path under `virtualagent/resources`) or `web` (with `url`). The array is empty
+  when the turn's source is `none`.
+- **`turn`** closes the turn. `kind` is `answer`, `question` (the agent is asking the
+  client something) or `no_answer` (the agent said it does not know). `source` is
+  `wiki`, `web` or `none` (MISSION hard invariant 3). A `question` turn has source
+  `none` when it is about language, and `wiki` or `web` when it is a clarification.
+- **`data: [DONE]`** terminates the stream.
+
+**Errors:**
+- `401` no bearer token
+- `403` the token belongs to a different session
+- `404` unknown session
+- `422` empty `text`
+- `429` the client has used its 100 turns in the last 24 hours (MISSION hard invariant 5). Body: `{"detail": "...", "resets_at": "<ISO 8601>"}`
+
+### `GET /api/sessions/{session_id}`
+
+The transcript, owner only.
 
 **Response `200`:**
 ```json
-[
-  {
-    "id": "vid_xyz",
-    "youtube_video_id": "dQw4w9WgXcQ",
-    "title": "Introduction to Python",
-    "description": "Learn Python basics...",
-    "url": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
-    "source_type": "youtube",
-    "lesson_url": null,
-    "created_at": "2026-03-01T10:00:00Z"
-  }
-]
-```
-
-`source_type` is `"youtube"` for standard YouTube content and `"dynamous"` for Dynamous community lessons.
-`lesson_url` is only present for `source_type: "dynamous"` and points to the Dynamous lesson page.
-
----
-
-## Ingest
-
-### `POST /api/ingest`
-
-Ingest a video with full metadata and transcript, triggering the chunk → embed → store pipeline.
-
-**Auth:** Required
-
-**Request body:**
-```json
 {
-  "title": "Advanced Python Patterns",
-  "description": "Deep dive into Python decorators and context managers",
-  "url": "https://www.youtube.com/watch?v=abc123xyz",
-  "transcript": "Welcome to this video on Python decorators...",
-  "segments": [
-    {
-      "start": 0.0,
-      "end": 15.5,
-      "text": "Welcome to this video on Python decorators..."
-    },
-    {
-      "start": 15.5,
-      "end": 32.1,
-      "text": "Let's start by understanding what a decorator is..."
-    }
+  "session_id": "s_9f1c2e",
+  "language": "fr",
+  "created_at": "2026-09-03T10:00:00Z",
+  "turns": [
+    { "role": "agent", "text": "Bonjour, comment puis-je vous aider ?", "language": "fr", "kind": "question", "source": "none" },
+    { "role": "client", "text": "Quels sont vos horaires d'ouverture ?", "language": "fr" },
+    { "role": "agent", "text": "Nous sommes ouverts de 9h à 18h.", "language": "fr", "kind": "answer", "source": "wiki" }
   ]
 }
 ```
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `title` | string | Yes | Video title (non-empty) |
-| `description` | string | Yes | Short description (non-empty) |
-| `url` | string (URL) | Yes | Valid YouTube video URL |
-| `transcript` | string | Yes | Full transcript text (non-empty) |
-| `segments` | array | No | Timestamped segments from Supadata. Each must have `start`, `end` (floats), and `text` (string). If provided, real timestamps are stored. Otherwise, timestamps are estimated evenly. |
+### `DELETE /api/sessions/{session_id}`
 
-**Response `200`:**
-```json
-{
-  "video_id": "vid_abc123",
-  "chunks_created": 47,
-  "status": "ok"
-}
-```
-
-**Response `422`** — validation error (empty field, malformed segment, etc.).
-
-**Response `502`** — embeddings API request failed.
-
-#### Ingest Pipeline Flow
-
-```
-1. VIDEO RECORD ──► POST /api/ingest {title, desc, url, transcript}
-                           │
-                           ▼
-2. CHUNKING ──► Docling HybridChunker (max_tokens=512)
-                           │
-                           ▼
-3. EMBEDDING ──► OpenRouter text-embedding-3-small (1536-dim)
-                           │
-                           ▼
-4. STORAGE ──► Postgres chunks table with embeddings
-                           │
-                           ▼
-5. RESPONSE ──► { video_id, chunks_created, status }
-```
-
-If `segments` are provided, the timestamped chunking path is used (`chunk_video_timestamped`),
-preserving exact Supadata timestamps. Otherwise, plain chunking (`chunk_video_fallback`) estimates
-timestamps evenly across the transcript.
+Ends the session and discards its transcript. `204`. Owner only.
 
 ---
 
-### `POST /api/ingest/from-url`
+## The voice contract with the app
 
-Ingest a YouTube video by URL alone — fetches transcript and metadata via Supadata.
+The service decides **what** is said and in **which voice locale**; the device's own
+speech engines do the listening and the speaking. The app:
 
-**Auth:** Required
+1. Recognises speech in the session's current language (the device locale if it is one
+   of the four, else English, until the first `language` event).
+2. Sends the transcript as a turn.
+3. Speaks each `sentence` event as it arrives, in its `voice_locale`.
+4. Switches its recogniser to the `language` event's locale for the next turn.
 
-**Request body:**
-```json
-{ "url": "https://www.youtube.com/watch?v=abc123xyz" }
-```
-
-**Response `200`:**
-```json
-{
-  "video_id": "vid_abc123",
-  "chunks_created": 52,
-  "status": "ok"
-}
-```
-
-**Response `400`** — invalid YouTube URL.
-
-**Response `503`** — Supadata rate-limited or transcript fetch failed.
-
-**Response `502`** — Supadata or embeddings API unavailable.
-
-**Flow:**
-```
-URL ──► Supadata API ──► Fetch transcript + title + description ──► Ingest Pipeline
-```
-
----
-
-## Channels
-
-### `POST /api/channels/sync`
-
-Enumerate all videos from the configured YouTube channel via Supadata and ingest any new ones.
-Idempotent by `youtube_video_id` — already-ingested videos are skipped.
-
-**Auth:** Required
-
-**Query params:**
-| Param | Type | Description |
-|-------|------|-------------|
-| `limit` | integer | Max videos to process. Defaults to full channel. Supadata returns newest-first. |
-
-**Response `200`:**
-```json
-{
-  "sync_run_id": "run_abc123",
-  "status": "completed",
-  "videos_total": 150,
-  "videos_new": 3,
-  "videos_error": 0
-}
-```
-
-**Response `400`** — `YOUTUBE_CHANNEL_ID` or `SUPADATA_API_KEY` not configured.
-
-**Response `502`** — failed to enumerate channel videos from Supadata.
-
-> **Note:** This is a synchronous, sequential operation — all videos are processed before the
-> HTTP response is returned. Set an appropriate request timeout on the caller.
-
----
-
-### `GET /api/channels/sync-runs`
-
-List the 10 most recent channel sync runs, ordered newest first.
-
-**Auth:** Required
-
-**Response `200`:**
-```json
-{
-  "sync_runs": [
-    {
-      "id": "run_abc123",
-      "status": "completed",
-      "videos_total": 150,
-      "videos_new": 3,
-      "videos_error": 0,
-      "started_at": "2026-03-01T10:00:00Z",
-      "finished_at": "2026-03-01T10:15:00Z"
-    }
-  ]
-}
-```
-
----
-
-## Error Responses
-
-All error responses follow a consistent shape:
-
-```json
-{
-  "detail": "Error message describing what went wrong"
-}
-```
-
-| Status | Meaning |
-|--------|---------|
-| `400` | Bad request — invalid input or configuration |
-| `401` | Unauthorized — missing or invalid session |
-| `403` | Forbidden — authenticated but not permitted |
-| `404` | Not found — resource does not exist |
-| `409` | Conflict — duplicate resource |
-| `422` | Validation error — request body failed Pydantic validation |
-| `429` | Rate limit exceeded |
-| `500` | Internal server error |
-| `502` | Bad gateway — external API (Supadata, OpenRouter) failed |
-| `503` | Service unavailable |
-
----
-
-## Auth (Public)
-
-### `POST /api/auth/signup`
-
-Create a new user account.
-
-**Auth:** None
-
-**Request body:**
-```json
-{ "email": "user@example.com", "password": "securepassword" }
-```
-
-**Response `201`:**
-```json
-{ "id": "user_xyz", "email": "user@example.com" }
-```
-
-**Response `409`** — email already registered.
-
----
-
-### `POST /api/auth/login`
-
-Authenticate and establish a session cookie.
-
-**Auth:** None
-
-**Request body:**
-```json
-{ "email": "user@example.com", "password": "securepassword" }
-```
-
-**Response `200`:**
-```json
-{ "id": "user_xyz", "email": "user@example.com" }
-```
-Sets a session cookie on the client.
-
-**Response `401`** — invalid credentials.
-
----
-
-### `POST /api/auth/logout`
-
-Destroy the current session.
-
-**Auth:** Required
-
-**Response `204`** — No content.
-
----
-
-### `GET /api/auth/me`
-
-Get the currently authenticated user.
-
-**Auth:** Required
-
-**Response `200`:**
-```json
-{ "id": "user_xyz", "email": "user@example.com" }
-```
-
----
+Nothing in the API is specific to speech input: typed text goes through the same route.

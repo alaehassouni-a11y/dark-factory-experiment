@@ -1,89 +1,108 @@
 # The validation harness
 
 ```bash
-python harness/ci.py --quick   # static + unit. ~3 min. Runs anywhere.
-python harness/ci.py           # the whole gate. Needs the validation env (below).
+python harness/ci.py --quick   # static + unit. A few minutes. Runs anywhere with uv.
+python harness/ci.py           # the whole gate. Needs uv and nothing else: no secrets, no network.
 ```
 
-Measured 2026-08-13 on `main`:
+Measured 2026-09-04 on `product/virtual-agent`:
 
 ```
-HARNESS_START mode=quick driver=http
+HARNESS_START mode=full driver=http
 STATIC_OK
-UNIT_PASSED tests=549
-GATE_OK mode=quick
+UNIT_PASSED tests=52
+APP_STARTED port=61766
+E2E_PASSED steps=12
+HOLDOUT_PASSED scenarios=5 assertions=32
+MUTATIONS_TOTAL=8
+MUTATIONS_CAUGHT=8
+MUTATIONS_NOT_INJECTED=0
+MUTATIONS_ABOVE_LINE=7
+GATE_OK mode=full
 ```
 
-549 = 390 backend (pytest, 67 skipped) + 159 frontend (vitest).
+`python` must be a real 3.11 interpreter. On Windows the Store stub that prints
+"Python est introuvable" is first on PATH by default; put
+`%LOCALAPPDATA%\Programs\Python\Python311` ahead of it or the gate exits before its
+first rung.
 
 ## What is in here, and where it came from
 
 | File | Origin |
 |---|---|
 | `ci.py` · `appproc.py` | **Verbatim from the `build-dark-factory` skill.** The ladder and the app-process manager are the same in every factory; do not edit them here. |
-| `harness.config.json` | This repo. Every command DynaChat runs. |
-| `static.py` · `unit.py` | This repo. `ci.py` runs one command per rung and DynaChat is two stacks, so the split lives here rather than in the ladder. |
-| `serve.py` | This repo. Starts the backend, or refuses with a named reason. |
-| `e2e.py` | This repo. **A floor, not the full journey - read the next section.** |
+| `harness.config.json` | This repo. Every command the gate runs. |
+| `static.py` · `unit.py` | This repo. The static rung is ruff, ruff-format, mypy and `static_ios.py`; the unit rung is pytest with a parsed count. Each says what it does **not** cover. |
+| `static_ios.py` | This repo. What can honestly be checked of the app without a Swift toolchain: the XcodeGen spec, the Info.plist, balanced braces. **Not a compile.** |
+| `serve.py` · `stubs.py` | This repo. Starts stub providers (an OpenAI-shaped model and embeddings, a Brave-shaped search) on a free port, points the service at them and at `fixtures/wiki`, runs uvicorn as a child that dies with it. |
+| `fixtures/wiki/` | This repo. The wiki the journey runs against: opening hours in English and French, a returns policy. **Locked**: the journey and the comprehensive-test scenarios both assume it. |
+| `e2e.py` | This repo. **FACTORY_RULES.md section 4, all of it.** Twelve assertions against a live process. |
+| `mutations/` | This repo. Eight deliberate defects and the runner that injects them. |
 
-Every command in `harness.config.json` is lifted from
-`.archon/workflows/dark-factory-validate-pr.yaml`, so there is one definition of a green
-build. **If you change one, change the other**, or the gate and the workflow will
-disagree about what passing means and only one of them decides a merge.
+The validate-pr workflow runs `serve.py` the same way `ci.py` does, so there is one
+definition of "the service is up" and one of "the journey passed".
 
-## The honest gap
+## What the gate proves, and what it does not
 
-**This harness does not yet run FACTORY_RULES.md section 4.** Section 4 is the real
-journey - sign in, ask a question with a known answer, watch the response stream, check
-the citation renders with a timestamp deep-link, click it, see the modal open at the
-right moment. That runs today in the validate-pr workflow's `behavioral-e2e` node via
-agent-browser, and it is what actually has authority over a merge.
+The service's only client is an iOS app that cannot run on the factory's machines. So
+the journey is the **API contract** in `docs/API.md`, driven exactly as the app drives
+it: open a session, send what the client said, read the stream. That is the whole of
+section 4 and it runs here, against a live process, every time.
 
-`e2e.py` asserts the HTTP contract underneath it: the app is genuinely serving, it can
-report its version, and MISSION hard invariant 2 (no anonymous access to chat) holds
-against a live process rather than against a mock. Five assertions. Real, worth having,
-and **a smaller claim than section 4.**
+Because the providers are stubs, the gate proves the **pipeline**: that the language the
+pipeline chose reached the model, that the source it declares is the one it used, that
+the web was **not** called while the wiki had a confident answer (the stub counts its
+calls), that a sentence is ready to speak before the turn closes. It does **not** prove
+that OpenRouter or Brave behave, and it does not prove that the app speaks. The first is
+the mocked-boundary policy in `CLAUDE.md`; the second is the gap `FACTORY.md` names, and
+a person with a Mac closes it.
 
 ## What exists above the independence line
 
 ```
-python .factory/holdout/run.py     HOLDOUT_PASSED scenarios=3 assertions=9
-python harness/mutations/run.py    MUTATIONS_TOTAL=4 CAUGHT=4 NOT_INJECTED=0
+python .factory/holdout/run.py     HOLDOUT_PASSED scenarios=5 assertions=32
+python harness/mutations/run.py    MUTATIONS_TOTAL=8 CAUGHT=8 NOT_INJECTED=0 ABOVE_LINE=7
 ```
 
-- **Holdout** - `.factory/holdout/run.py`, three composed scenarios aimed at MISSION
-  hard invariants 1 and 2. Read its header before citing a green result: **it was
-  written 2026-08-13, after the code it judges.** That makes it a floor from today
-  forward, with authority over future diffs and none over the 390 PRs already in `main`.
-- **Mutation set** - `harness/mutations/`, four defects, all four caught.
-- **Ratchet** - `.factory/locks/floor.json`, floors set equal to what is observed today
+- **Holdout** - `.factory/holdout/run.py`, five composed scenarios aimed at MISSION hard
+  invariants 1 through 5. **Written 2026-09-03 from the PRD and `docs/API.md`, before the
+  code existed**, against module names that did not yet exist; the implementation was
+  built until they passed. That is the property in the right order. One mechanical
+  adaptation since: the route walk descends into FastAPI 0.141's nested routers
+  (2026-09-04). The assertions are unchanged.
+- **Mutation set** - `harness/mutations/`, eight defects, every one type-clean and
+  lint-clean on purpose, aimed at the invariants and at the one property the requirement
+  calls "live". All eight caught, and **seven of the eight by the holdout**, whether or
+  not the unit suite caught them first. The eighth, `sentences-only-at-the-end`, is caught
+  by unit alone: the holdout has no liveness scenario yet, and a defect caught only by a
+  check the builder can edit is a defect the builder could arrange not to be caught.
+- **Ratchet** - `.factory/locks/floor.json`, floors set equal to what is observed today,
   so the slack is zero.
 
-**The number that matters is 1.** Of four mutations, exactly one is caught *above* the
-independence line - `lock-key-is-constant`, by the holdout. The other three are caught by
-static or unit, which the builder can read and edit. The cause is the shape of those
-defects rather than a weakness in the holdout: they break type-checking rather than
-behaviour, and the compiler finds those. See `.factory/decisions.md` D-003.
+Re-run the mutation set after any harness change and watch `MUTATIONS_ABOVE_LINE`. If it
+falls, the gate has become more dependent on checks the builder controls; if it reaches
+zero, entirely.
 
-Re-run the mutation set after any harness change. If nothing is caught above the line,
-the gate has become entirely dependent on checks the builder controls.
+## The mutation runner's two deviations
 
-## The validation env
+`mutations/run.py` mutates the real file and restores it with `git checkout --`, instead
+of copying the tree per defect: `app/backend/.venv` is large and the checks need it. So
+the runner **refuses a dirty tree**, and if it is killed mid-defect `git status` shows
+exactly one modified file. And it runs `ci.py --quick` plus the holdout, not the full
+gate, so the E2E rung is excluded from what a mutation can be caught by. A defect only
+the journey could catch would escape here, and the runner says so in its header.
 
-The backend hard-requires `DATABASE_URL`, `OPENROUTER_API_KEY`, `JWT_SECRET`,
-`SUPADATA_API_KEY` and `YOUTUBE_CHANNEL_ID` at **import** time. `serve.py` refuses to
-start without them and names which are missing:
+## Refusing loudly
+
+`serve.py` refuses to start without `uv` and says so:
 
 ```
-APP_START_REFUSED missing=DATABASE_URL,OPENROUTER_API_KEY,...
+APP_START_REFUSED missing=uv - install uv (https://docs.astral.sh/uv/) ...
 ```
 
-That refusal is deliberate. On 2026-04-18 the workflow launched uvicorn without loading
-them, the process crashed at import, the health poll failed, and the synthesizer scored
-it as `not_e2e_testable`. PR #80 auto-merged having never been driven through a browser
-(`3fc03a0`). **A step that cannot run has to be loud, not absent.**
-
-The file lives outside the repo because it holds secrets. Override the path with
-`DARK_FACTORY_VALIDATION_ENV`; on the VPS it is `/opt/dark-factory/validation.env`.
-Point it at a **dedicated validation database** - an E2E against production data is a
-data-loss incident waiting for a slow afternoon.
+That refusal is deliberate. On 2026-04-18 the previous product's workflow launched the
+service without its environment, the process crashed at import, the health poll failed,
+and the synthesizer scored it as `not_e2e_testable`. A PR auto-merged having never been
+driven end to end. **A step that cannot run has to be loud, not absent.** The
+`APP_STARTED` marker, printed only once `/api/health` reports the wiki loaded, is the
+positive assertion the validate-pr workflow reads deterministically before any approve.

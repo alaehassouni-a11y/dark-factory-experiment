@@ -1,11 +1,12 @@
 name: dark-factory-fix-github-issue
 description: |
-  Use when: Dark Factory orchestrator wants to implement an accepted issue in DynaChat
-            (Python/FastAPI backend + React/TypeScript frontend).
+  Use when: Dark Factory orchestrator wants to implement an accepted issue in the
+            Virtual Agent (one Python/FastAPI service under `app/backend/`, uv-managed,
+            whose only client is an iOS app).
   Triggers: Orchestrator dispatch when an issue is labeled `factory:accepted`.
   Does: Classifies the issue, researches context, investigates (bugs) or plans (features),
-        implements the fix with Python + Bun-aware tooling, runs the Dark Factory validator
-        (ruff/mypy/pytest + tsc/biome/vitest), creates a draft PR, runs smart review,
+        implements the fix with uv-managed Python tooling, runs the Dark Factory validator
+        (ruff/mypy/pytest + MISSION invariant guard), creates a draft PR, runs smart review,
         self-fixes findings, simplifies, and reports back to the issue.
   NOT for: Triage (use dark-factory-triage), PR validation (use dark-factory-validate-pr),
            PR fix-up from failed validation (use dark-factory-fix-pr).
@@ -13,10 +14,11 @@ description: |
   This is a fork of the bundled `archon-fix-github-issue` that the Dark Factory owns.
   It can evolve independently from the bundled default. The key divergences:
   - Every AI node references a `.md` command file (no inline prompts — Dark Factory rule).
-  - Implementation uses `dark-factory-fix-issue` (Python + Bun dep install, DynaChat-specific
-    sanity checks).
-  - Validation uses `dark-factory-validate` (ruff/mypy/pytest + tsc/biome/vitest per CLAUDE.md
-    + RAG invariant guard) instead of the bundled JS-only `archon-validate`.
+  - Implementation uses `dark-factory-fix-issue` (uv dep install, Virtual Agent-specific
+    sanity checks: the service must still import).
+  - Validation uses `dark-factory-validate` (ruff/mypy/pytest, the same rungs as
+    `python harness/ci.py --quick`, + MISSION invariant guard) instead of the bundled
+    JS-only `archon-validate`.
   - The four prompts that were inline in the bundled workflow (extract-issue-number,
     classify, create-pr, review-classify) are now separate command files under
     `.archon/commands/dark-factory-*.md`.
@@ -109,7 +111,7 @@ nodes:
     timeout: 10000
 
   # ═══════════════════════════════════════════════════════════════
-  # PHASE 4: IMPLEMENT (Dark Factory fork — Python + Bun-aware)
+  # PHASE 4: IMPLEMENT (Dark Factory fork — Python + uv)
   # ═══════════════════════════════════════════════════════════════
 
   - id: implement
@@ -118,7 +120,7 @@ nodes:
     context: fresh
 
   # ═══════════════════════════════════════════════════════════════
-  # PHASE 5: VALIDATE (Dark Factory fork — ruff/mypy/pytest + tsc/biome/vitest)
+  # PHASE 5: VALIDATE (Dark Factory fork — ruff/mypy/pytest + MISSION invariants)
   # ═══════════════════════════════════════════════════════════════
 
   - id: validate

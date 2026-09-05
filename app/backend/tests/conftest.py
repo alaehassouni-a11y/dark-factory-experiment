@@ -1,210 +1,130 @@
-"""Shared pytest fixtures for DynaChat backend tests.
+"""Shared fixtures. Fakes sit at the provider boundary (model, embeddings, web search); the
+pipeline, routes and wiki index under test are the real ones."""
 
-Conventions (see CLAUDE.md §Testing):
-- Use pytest-asyncio for async tests (`@pytest.mark.asyncio` or the
-  `asyncio_mode = "auto"` mode configured in `pyproject.toml`).
-- Use `httpx.AsyncClient` against a test FastAPI app for integration tests.
-- Tests must NEVER touch `app/backend/data/chat.db`. Spin up a temp SQLite
-  database per-test via the `tmp_path` fixture.
-"""
+from __future__ import annotations
 
 import os
-from collections import defaultdict
-from datetime import UTC, datetime, timedelta
-from uuid import UUID
+import re
+import zlib
+from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 
-# Set auth-related env vars BEFORE any backend import so config.py picks them up.
-os.environ["JWT_SECRET"] = "test-secret-please-do-not-use-in-prod"
-os.environ["DATABASE_URL"] = "postgresql://test:test@localhost:5432/test"
-os.environ["SUPADATA_API_KEY"] = "test-supadata-key"
-os.environ["YOUTUBE_CHANNEL_ID"] = "UC_testchannel"
-os.environ["CHANNEL_SYNC_TYPE"] = "video"
+# Config reads the environment once at import; set it before any backend import.
+os.environ.setdefault("OPENROUTER_API_KEY", "test-not-a-real-key")
+os.environ["WIKI_RESOURCES_DIR"] = str(Path(__file__).parent / "fixtures" / "wiki")
 
+import httpx
 import pytest
 
-import backend.rag.retriever_hybrid as retriever_hybrid_module
-from backend import rate_limit, signup_rate_limit
+from backend import rate_limit
+from backend.agent.pipeline import Agent
+from backend.search.web import WebResult
+from backend.sessions.store import store
+from backend.wiki.index import WikiIndex
+
+FIXTURE_WIKI = Path(__file__).parent / "fixtures" / "wiki"
+
+
+def bag(text: str, dims: int = 256) -> list[float]:
+    vec = [0.0] * dims
+    for word in re.findall(r"\w+", text.lower()):
+        vec[zlib.crc32(word.encode("utf-8")) % dims] += 1.0
+    norm = sum(v * v for v in vec) ** 0.5 or 1.0
+    return [v / norm for v in vec]
+
+
+class FakeLLM:
+    """Replies come from `script`: a string, or a callable of the messages."""
+
+    def __init__(
+        self, script: str | Callable[[list[dict[str, str]]], str] = "Fixed reply."
+    ) -> None:
+        self.script = script
+        self.calls: list[list[dict[str, str]]] = []
+
+    async def embed(self, texts: list[str]) -> list[list[float]]:
+        return [bag(t) for t in texts]
+
+    async def stream(self, messages: list[dict[str, str]]) -> AsyncIterator[str]:
+        self.calls.append(messages)
+        reply = self.script(messages) if callable(self.script) else self.script
+        # Deltas of a few characters, so marker buffering and sentence splitting are exercised.
+        for i in range(0, len(reply), 4):
+            yield reply[i : i + 4]
+
+
+class SpySearch:
+    def __init__(self, available: bool = True, results: list[WebResult] | None = None) -> None:
+        self.available = available
+        self.results = (
+            results
+            if results is not None
+            else [
+                WebResult(
+                    title="Example page", url="https://example.org/page", snippet="Example snippet."
+                )
+            ]
+        )
+        self.queries: list[tuple[str, str]] = []
+
+    async def search(self, query: str, language: str) -> list[WebResult]:
+        self.queries.append((query, language))
+        return list(self.results)
 
 
 @pytest.fixture(autouse=True)
-def reset_retriever_hybrid_cache():
-    """Ensure the module-level hybrid video cache is clean before and after every test."""
-    retriever_hybrid_module._video_cache.clear()
+def clean_state():
+    rate_limit.reset()
+    store.clear()
     yield
-    retriever_hybrid_module._video_cache.clear()
+    rate_limit.reset()
+    store.clear()
 
 
 @pytest.fixture
-def message_store() -> dict[str, list[datetime]]:
-    """Per-test in-memory `user_messages` store keyed by stringified UUID.
-
-    Exposed so integration tests can seed rows directly (e.g. "user already
-    has 25 messages; verify 429 on next send").
-    """
-    return defaultdict(list)
-
-
-@pytest.fixture(autouse=True)
-def patch_rate_limit(monkeypatch, message_store):
-    """Replace `rate_limit.check_and_record` + `.get_status` with in-memory fakes.
-
-    The real implementation opens a transaction against Postgres (which isn't
-    available in the test environment). The fakes preserve the atomic contract
-    by doing count + insert in a single sync block — sufficient for the
-    single-threaded httpx.AsyncClient tests.
-    """
-
-    async def fake_check_and_record(user_id: UUID | str) -> None:
-        uid = str(user_id)
-        now = datetime.now(UTC)
-        cutoff = now - timedelta(hours=rate_limit.WINDOW_HOURS)
-        in_window = [t for t in message_store[uid] if t > cutoff]
-        if len(in_window) >= rate_limit.DAILY_MESSAGE_CAP:
-            oldest = min(in_window)
-            raise rate_limit.RateLimitExceeded(
-                reset_at=oldest + timedelta(hours=rate_limit.WINDOW_HOURS)
-            )
-        message_store[uid].append(now)
-
-    async def fake_get_status(user_id: UUID | str) -> rate_limit.RateLimitStatus:
-        uid = str(user_id)
-        now = datetime.now(UTC)
-        cutoff = now - timedelta(hours=rate_limit.WINDOW_HOURS)
-        in_window = [t for t in message_store[uid] if t > cutoff]
-        used = len(in_window)
-        remaining = max(0, rate_limit.DAILY_MESSAGE_CAP - used)
-        resets_at: datetime | None = None
-        if in_window:
-            resets_at = min(in_window) + timedelta(hours=rate_limit.WINDOW_HOURS)
-        return rate_limit.RateLimitStatus(used=used, remaining=remaining, resets_at=resets_at)
-
-    monkeypatch.setattr(rate_limit, "check_and_record", fake_check_and_record)
-    monkeypatch.setattr(rate_limit, "get_status", fake_get_status)
-
-
-class _FakeConn:
-    """No-op connection for tests that go through the signup route.
-
-    The real route opens `pool.acquire() → conn.transaction()` and passes the
-    connection into `signup_rate_limit.check/.record` and `users_repo.create_user`.
-    All three are monkeypatched by the test suite, so the connection is never
-    actually used — but the context-manager plumbing still needs to succeed.
-    """
-
-    async def execute(self, *args, **kwargs):
-        return None
-
-    async def fetchrow(self, *args, **kwargs):
-        return None
-
-    async def fetch(self, *args, **kwargs):
-        return []
-
-    async def fetchval(self, *args, **kwargs):
-        return 0
-
-    def transaction(self):
-        return self
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-
-class _FakeAcquire:
-    """Dual-purpose awaitable + async context manager — matches asyncpg.pool.PoolAcquireContext."""
-
-    def __await__(self):
-        async def _do() -> _FakeConn:
-            return _FakeConn()
-
-        return _do().__await__()
-
-    async def __aenter__(self) -> _FakeConn:
-        return _FakeConn()
-
-    async def __aexit__(self, *exc):
-        return False
-
-
-class _FakePool:
-    def acquire(self):
-        return _FakeAcquire()
-
-
-@pytest.fixture(autouse=True)
-def patch_pg_pool(monkeypatch):
-    """Return a no-op pool so `pool.acquire()`/`conn.transaction()` succeed in tests.
-
-    `get_pg_pool` is imported by name into several modules, so we patch every
-    binding — not just the source in `backend.db.postgres`.
-    """
-    from backend import rate_limit as rate_limit_mod
-    from backend.db import postgres as pg
-    from backend.db import repository as repo_mod
-    from backend.db import users_repo as users_repo_mod
-    from backend.routes import auth as auth_route
-
-    fake = _FakePool()
-    getter = lambda: fake  # noqa: E731
-    monkeypatch.setattr(pg, "get_pg_pool", getter)
-    monkeypatch.setattr(auth_route, "get_pg_pool", getter)
-    monkeypatch.setattr(repo_mod, "get_pg_pool", getter)
-    monkeypatch.setattr(users_repo_mod, "get_pg_pool", getter)
-    monkeypatch.setattr(rate_limit_mod, "get_pg_pool", getter)
-
-
-@pytest.fixture(autouse=True)
-def patch_signup_rate_limit(monkeypatch):
-    """Permissive stub for `signup_rate_limit.check` and `.record`.
-
-    Most test suites (test_auth.py, test_rate_limit.py, etc.) sign up multiple
-    users per test and would trip the real 1/IP/hr limit. This stub
-    short-circuits both functions to no-ops so those suites are unaffected.
-
-    Tests in `test_signup_rate_limit.py` opt OUT of this fixture by providing
-    their own override that restores the real implementation (exercised
-    against a real Postgres).
-    """
-
-    async def fake_check(ip, conn):
-        return None
-
-    async def fake_record(conn, ip, email_attempted, outcome):
-        return None
-
-    monkeypatch.setattr(signup_rate_limit, "check", fake_check)
-    monkeypatch.setattr(signup_rate_limit, "record", fake_record)
-
-
-class _FakeNeighbors:
-    """Callable with settable side_effect for expansion tests."""
-
-    def __init__(self):
-        self._side_effect = None
-
-    async def __call__(self, video_id: str, chunk_index: int, window: int = 1) -> list[dict]:
-        if self._side_effect:
-            result: list[dict] = await self._side_effect(video_id, chunk_index, window)
-            return result
-        return []
-
-    @property
-    def side_effect(self):
-        return self._side_effect
-
-    @side_effect.setter
-    def side_effect(self, value):
-        self._side_effect = value
+def llm() -> FakeLLM:
+    return FakeLLM("We are open from nine to six, Monday to Saturday.")
 
 
 @pytest.fixture
-def patch_get_chunk_neighbors(monkeypatch):
-    """Stub `repository.get_chunk_neighbors` so expansion tests don't need a real DB."""
-    from backend.db import repository as repo_mod
+def search() -> SpySearch:
+    return SpySearch()
 
-    fake = _FakeNeighbors()
-    monkeypatch.setattr(repo_mod, "get_chunk_neighbors", fake)
-    yield fake
+
+@pytest.fixture
+async def wiki(llm: FakeLLM) -> WikiIndex:
+    return await WikiIndex.build(FIXTURE_WIKI, llm)
+
+
+@pytest.fixture
+def agent(wiki: WikiIndex, llm: FakeLLM, search: SpySearch) -> Agent:
+    return Agent(wiki=wiki, llm=llm, search=search)
+
+
+@pytest.fixture
+async def client(agent: Agent, wiki: WikiIndex, search: SpySearch):
+    from backend.main import app
+
+    app.state.agent = agent
+    app.state.wiki = wiki
+    app.state.search = search
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
+        yield c
+
+
+def parse_sse(body: str) -> list[tuple[str | None, str]]:
+    """(event name or None, raw data) per frame, in order."""
+    frames: list[tuple[str | None, str]] = []
+    for block in body.split("\n\n"):
+        if not block.strip():
+            continue
+        event = None
+        data_lines = []
+        for line in block.splitlines():
+            if line.startswith("event:"):
+                event = line[len("event:") :].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:") :].strip())
+        frames.append((event, "\n".join(data_lines)))
+    return frames

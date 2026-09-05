@@ -13,7 +13,7 @@ argument-hint: (no arguments - reads test-*.md files from $ARTIFACTS_DIR)
 
 You are the report synthesizer for the Dark Factory comprehensive
 weekly test. Four scenario nodes have run against a real running
-DynaChat instance. Your job: read their outputs and produce a single
+Virtual Agent service (stub providers, fixture wiki). Your job: read their outputs and produce a single
 aggregate report.
 
 Read all files matching `$ARTIFACTS_DIR/test-*.md` (there should be 4:

@@ -1,136 +1,83 @@
 # Deploy
 
-Production deployment via Docker Compose. Runs Caddy (TLS + reverse proxy) and Postgres (pgvector).
+Production deployment via Docker Compose. Runs Caddy (TLS + reverse proxy) in front of two identical copies of the Virtual Agent service — `app-blue` and `app-green` — and swaps between them for zero-downtime deploys. There is no database, no migration step and no frontend build: the service is a single FastAPI process, its only client is the iOS app, and the wiki it answers from ships inside the image.
 
 ## First-time setup on a new VPS
 
 1. Install Docker: https://docs.docker.com/engine/install/
-2. Clone this repo to `/opt/dynachat/` (owned by a dedicated `dynachat` user, `chmod 700`)
-3. Copy `.env.example` to `.env`, fill in real values (`chmod 600`)
-4. Point DNS A record for your subdomain at the VPS public IP
-5. `cd deploy && docker compose up -d`
-6. Caddy auto-provisions a Let's Encrypt cert on first request
+2. Clone this repo to `/opt/virtualagent/app/` (owned by a dedicated `virtualagent` user, `chmod 700` on `/opt/virtualagent/`)
+3. Copy `deploy/.env.example` to `/opt/virtualagent/.env`, fill in real values (`chmod 600`). `VIRTUALAGENT_HOST` is the public hostname and `LETSENCRYPT_EMAIL` the contact; the Caddyfile reads both from the environment and compose refuses to start Caddy without them
+4. Point the DNS A record for that hostname at the VPS public IP
+5. `cd /opt/virtualagent/app/deploy && docker compose --env-file /opt/virtualagent/.env config >/dev/null` renders the stack and fails loudly, naming the variable, if `VIRTUALAGENT_HOST`, `LETSENCRYPT_EMAIL` or `OPENROUTER_API_KEY` is still unset
+6. `cp upstream.conf.example upstream.conf && docker compose --env-file /opt/virtualagent/.env up -d caddy app-blue`
+7. Caddy auto-provisions a Let's Encrypt cert on first request
+8. Copy `deploy/deploy.sh` to `/opt/virtualagent/deploy.sh` and schedule it (systemd timer or cron). From then on every commit to `main` is a blue/green swap; nobody runs `docker compose` by hand
+
+A host that already runs an older layout (a different root than `/opt/virtualagent/`) does not need to move: `deploy.sh` derives the checkout and the env file from its own location (`<root>/deploy.sh`, `<root>/app`, `<root>/.env`); the log and lock default to `/var/log/virtualagent-deploy.log` and `/var/run/virtualagent-deploy.lock`. Each can be overridden with `VIRTUALAGENT_ROOT`, `VIRTUALAGENT_REPO`, `VIRTUALAGENT_ENV`, `VIRTUALAGENT_LOG`, `VIRTUALAGENT_LOCK` (absolute paths). Mirror the script, keep the root. On the first run after this change the script recreates the Caddy container once, so it picks up the two new variables; expect a few seconds of downtime that one time
+
+## Migrating a host that already runs the stack
+
+Do these **before** the commit that introduces `VIRTUALAGENT_HOST` reaches `main`, in this order. The timer will otherwise pull a Caddyfile that reads the hostname from an environment the running container does not have, and the old mirrored `deploy.sh` would read the resulting `docker compose config` failure as "blue/green not yet configured" and exit 0 with nothing deployed.
+
+1. Add `VIRTUALAGENT_HOST` and `LETSENCRYPT_EMAIL` to the host `.env` (the values that used to be edited into the Caddyfile). Remove the DynaChat variables if they are still there; nothing reads them
+2. Mirror the new `deploy/deploy.sh` over the host copy the timer runs
+3. If the Caddyfile in the host checkout was edited by hand (the old runbook said to), discard that edit so the pull can fast-forward: `git -C /opt/virtualagent/app checkout -- deploy/Caddyfile`
+4. Merge. On its first run the new script renders the stack against `.env`, recreates the Caddy container once so it has the two variables (a few seconds of downtime, that one time), then does the normal blue/green swap
+
+If step 1 is missed, the script says so in its log on every run and pulls nothing; once the variables are in, the next run deploys.
 
 ## Files
 
-- `docker-compose.yml` - Caddy + Postgres services
-- `Caddyfile` - reverse-proxy config (TLS + subdomain routing)
-- `.env.example` - secret template (committed); real `.env` is gitignored
+- `docker-compose.yml` - Caddy + the two app colours
+- `Dockerfile` - the service image: Python 3.11, `uv`-installed dependencies, the backend, and a copy of `virtualagent/resources/`
+- `Caddyfile` - reverse-proxy config (TLS + hostname routing); the hostname and contact come from `.env`, and it imports `upstream.conf`
+- `upstream.conf.example` - shape of the one-line file that names the live colour. The real `upstream.conf` is written by `deploy.sh` and is gitignored
+- `deploy.sh` - blue/green deploy script. This copy is the source of truth; the live `/opt/virtualagent/deploy.sh` is mirrored by hand. It fails loudly when the checkout, the env file, or a required variable is missing, rather than exiting 0 with nothing deployed
+- `.env.example` - secret template (committed); real `.env` lives outside the checkout and is gitignored
 
 ## Ports
 
 - `80` / `443` (public) - Caddy
-- `127.0.0.1:5433` (loopback only) - Postgres
+
+Nothing else is published. The app containers are reachable only from Caddy over the internal Docker network.
 
 ## Environment variables
 
-The app container reads these from `/opt/dynachat/.env` via docker-compose:
+The containers read these from `/opt/virtualagent/.env` via docker-compose. The first two go to the Caddy container, the rest to the app containers:
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `OPENROUTER_API_KEY` | **yes** | OpenRouter embeddings + chat |
-| `SUPADATA_API_KEY` | prod only | YouTube transcript fetch |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | **yes** | Postgres credentials used by both the `postgres` service and the app's `DATABASE_URL` |
-| `JWT_SECRET` | **yes** (auth) | 32+ random bytes used to sign session-cookie JWTs. Generate with `openssl rand -hex 32`. Rotating this value invalidates all live sessions |
-| `ADMIN_USER_EMAIL` | optional | Email of the single admin user (case-insensitive match). When unset, every `/api/admin/*` endpoint returns 403. Match MUST equal the email the admin registered with |
+| `VIRTUALAGENT_HOST` | **yes** | The public hostname Caddy serves and provisions a certificate for. Read by the Caddy container, not the app |
+| `LETSENCRYPT_EMAIL` | **yes** | The contact Let's Encrypt notifies about the certificate. Read by the Caddy container |
+| `OPENROUTER_API_KEY` | **yes** | OpenRouter chat completions and the embeddings that index the wiki. The service refuses to start without it |
+| `BRAVE_SEARCH_API_KEY` | optional | Brave Search key for the web fallback. When unset the agent answers from the wiki only and says it does not know otherwise |
+| `CHAT_MODEL` | optional | OpenRouter chat model. Defaults to `anthropic/claude-sonnet-4.6`; set it to canary a new model on the inactive colour |
+| `CORS_ORIGINS` | optional | Comma-separated browser origins allowed to call the API. The iOS app needs none; leave empty |
 
-The app's `DATABASE_URL` is assembled from the `POSTGRES_*` values inside
-`docker-compose.yml` — you do **not** set it directly in `.env`. It points at
-the in-compose `postgres` service by DNS name.
+`WIKI_RESOURCES_DIR` is **not** set in `.env`. `docker-compose.yml` pins it to
+`/app/virtualagent/resources`, the copy of the wiki that `Dockerfile` bakes into
+the image, so the code and the knowledge it answers from always deploy together.
 
 Minimal `.env` for a fresh deploy:
 
 ```
+VIRTUALAGENT_HOST=agent.example.com
+LETSENCRYPT_EMAIL=ops@example.com
 OPENROUTER_API_KEY=sk-or-...
-SUPADATA_API_KEY=...
-POSTGRES_USER=dynachat
-POSTGRES_PASSWORD=<random>
-POSTGRES_DB=dynachat
-JWT_SECRET=<openssl rand -hex 32>
-ADMIN_USER_EMAIL=admin@yourdomain.com
+BRAVE_SEARCH_API_KEY=...
 ```
+
+Changing `VIRTUALAGENT_HOST` or `LETSENCRYPT_EMAIL` later means recreating the Caddy container (`docker compose --env-file /opt/virtualagent/.env up -d caddy`); a `caddy reload` re-reads the Caddyfile but not the container's environment.
+
+## The wiki deploys like code
+
+The agent's knowledge is every `.md` and `.txt` file under `virtualagent/resources/`
+at the repo root. The image copies that folder in at build time and the service
+indexes it at startup, so adding a document to the folder and merging to `main`
+*is* a deploy: `deploy.sh` builds a new image on the inactive colour, waits for
+its healthcheck (which only passes once the wiki is indexed), and flips Caddy.
+There is no upload path, no sync job and no volume to keep in step.
 
 ## Secret hygiene
 
 The real `.env` lives ONLY on the deploy host, in a directory owned by a non-factory user with mode 600. It is never committed, never shared via chat, and never readable by the Dark Factory workflow user.
-
-## Automated YouTube channel sync
-
-`deploy/sync-channel.sh` runs a one-shot YouTube sync inside the active app
-container by `docker exec`-ing into the color named in `upstream.conf`. Two
-systemd units in `deploy/systemd/` drive it on a schedule:
-
-- `dynachat-channel-sync.service` — one-shot, calls `sync-channel.sh`
-- `dynachat-channel-sync.timer`   — daily at 00:00 UTC, with a 30-min jitter
-
-### Install on a host
-
-```bash
-# As root, from the repo checkout (typically /opt/dynachat/app/)
-install -m 0644 deploy/systemd/dynachat-channel-sync.service /etc/systemd/system/
-install -m 0644 deploy/systemd/dynachat-channel-sync.timer   /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now dynachat-channel-sync.timer
-
-# Verify
-systemctl list-timers dynachat-channel-sync.timer
-journalctl -u dynachat-channel-sync.service -n 20
-```
-
-### Trigger a sync manually
-
-```bash
-# Full sync (newest first, stops once Supadata is exhausted)
-systemctl start dynachat-channel-sync.service
-
-# Or run the wrapper directly with custom args (e.g. cap to 20 newest videos)
-/opt/dynachat/app/deploy/sync-channel.sh --limit 20
-```
-
-The wrapper is idempotent — already-ingested videos are skipped by
-`youtube_video_id` unless `--force` is passed (used to backfill new chunk
-schemas; see `routes/channels.py`'s `force` flag).
-
-## SQLite → Postgres cutover runbook
-
-When migrating an existing production deployment from SQLite to Postgres:
-
-### Prerequisites
-- Postgres must be running and healthy (`postgres` service up)
-- `DATABASE_URL` must be set correctly in `.env`
-- `alembic.ini` must be present in the app container
-
-### Step 1 — Snapshot SQLite (before cutover)
-```bash
-# On the host, inside the app container or at app/backend/data/
-./scripts/dump_sqlite.sh
-# Or manually:
-cp /app/data/chat.db /app/data/chat.db.$(date +%s).bak
-```
-
-### Step 2 — Run Alembic migrations (first deploy with new build)
-The app runs `alembic upgrade head` automatically on startup.
-Verify it succeeded:
-```bash
-docker compose exec app-blue alembic --config /app/backend/alembic.ini current
-# Should show: 0001 (or latest revision)
-```
-
-### Step 3 — Copy data from SQLite to Postgres (one-time)
-```bash
-# Run the migration script inside the app container
-docker compose exec app-blue python -m backend.scripts.migrate_sqlite_to_pg /app/data/chat.db
-# The script will prompt for DATABASE_URL (use the same one from .env)
-```
-
-### Step 4 — Verify
-```bash
-# Check row counts match between snapshot and Postgres
-docker compose exec postgres psql -U ${POSTGRES_USER} -d ${POSTGRES_DB} -c 'SELECT count(*) from videos'
-docker compose exec postgres psql -U ${POSTGRES_USER} -d ${POSTGRES_DB} -c 'SELECT count(*) from chunks'
-```
-
-### Step 5 — Restart app (ensures clean pool state)
-```bash
-docker compose restart app-blue app-green
-```

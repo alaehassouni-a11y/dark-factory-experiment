@@ -1,9 +1,9 @@
 ---
-description: Comprehensive test scenario 4 - verify multi-turn conversation context is retained within a single thread.
-argument-hint: (no arguments - reads port files from $ARTIFACTS_DIR)
+description: Comprehensive test scenario 4 - language following and privacy. Verify Arabic is detected as Arabic, an unsupported language yields a spoken question with source none, and another session's token cannot read a session.
+argument-hint: (no arguments - reads the port file from $ARTIFACTS_DIR)
 ---
 
-# Dark Factory Comprehensive Test — Conversation History
+# Dark Factory Comprehensive Test — Language Following and Privacy
 
 **Workflow ID**: $WORKFLOW_ID
 
@@ -12,42 +12,59 @@ argument-hint: (no arguments - reads port files from $ARTIFACTS_DIR)
 ## Your Role
 
 You are running scenario 4 of the Dark Factory comprehensive weekly test
-for DynaChat. Verify that multi-turn conversation context is retained
-within a single thread.
+for the Virtual Agent. Verify two MISSION hard invariants from the
+outside: the agent follows the client's language within the supported set
+and asks when it cannot (invariant 1), and a session is private to the
+client that opened it (invariant 4).
 
-You have Bash + agent-browser. Do NOT read source code.
+You have Bash and drive the service with `curl` against `docs/API.md`.
+Do NOT read source code.
 
 ---
 
-## Running App URLs
+## Running Service URL
 
-- Frontend: `http://127.0.0.1:$(cat $ARTIFACTS_DIR/.frontend-port)`
-- Backend:  `http://127.0.0.1:$(cat $ARTIFACTS_DIR/.backend-port)`
+- Base: `http://127.0.0.1:$(cat $ARTIFACTS_DIR/.backend-port)`
 
 ---
 
 ## Steps
 
-1. `agent-browser open <frontend URL>`
-2. Start a NEW conversation (not a continuation of any previous
-   scenario's thread). If there's a "new chat" button, click it.
-3. Send message 1 (exactly): "My favorite color is cerulean."
-   Wait for the assistant to reply.
-4. Send message 2 (exactly): "I also have a cat named Basil."
-   Wait for the assistant to reply.
-5. Send message 3 (exactly): "What was the first thing I told you
-   about myself?"
-   Wait for the assistant to reply.
-6. Verify that the assistant's reply to message 3 explicitly mentions
-   "cerulean" (or clearly references the favorite-color statement).
-   If it talks about the cat, or says "I don't know", or gives a
-   generic answer that doesn't reference the favorite color, that
-   is a FAIL - the app lost conversation context.
-7. Screenshot the full conversation thread (all 3 turns visible if
-   possible) to `$ARTIFACTS_DIR/test-conversation-history.png`
-8. `agent-browser close`
-9. Write a markdown summary to `$ARTIFACTS_DIR/test-conversation-history.md`
-   including the verbatim answer to message 3.
+1. Confirm `GET $BASE/api/health` reports `"status":"ok"`.
+2. Open session A: `POST $BASE/api/sessions` with
+   `{"client_id":"weekly-scenario-4a"}`; assert `201`, capture
+   `SESSION_A` and `TOKEN_A`.
+3. Send an Arabic question on session A (exactly):
+   `{"text":"ما هي ساعات العمل لديكم؟"}`
+   Save the SSE body to `$ARTIFACTS_DIR/test-conversation-history-ar.txt`
+   and wait for `data: [DONE]`.
+4. Verify the `event: language` frame has `"language": "ar"` and
+   `"voice_locale": "ar-SA"`, and that at least one `event: sentence`
+   frame precedes the `event: turn` frame. Any other language is a FAIL -
+   the agent did not follow the client.
+5. Open a FRESH session B (not a continuation of A):
+   `POST $BASE/api/sessions` with `{"client_id":"weekly-scenario-4b"}`;
+   assert `201`, capture `SESSION_B` and `TOKEN_B`.
+6. Send a Spanish sentence on session B (exactly):
+   `{"text":"¿Dónde está el baño, por favor?"}`
+   Save the SSE body to `$ARTIFACTS_DIR/test-conversation-history-es.txt`.
+7. Verify: the `event: language` frame has `"language": null`; the
+   `event: turn` frame has `"kind": "question"` and `"source": "none"`;
+   and at least one `event: sentence` frame exists (the agent ASKED, out
+   loud, for a supported language). An `answer` turn, a `wiki` or `web`
+   source, or a detected language of `es` is a FAIL.
+8. Privacy: read session A with session B's token:
+   `curl -s -o "$ARTIFACTS_DIR/test-conversation-history-403.txt" -w '%{http_code}' "$BASE/api/sessions/$SESSION_A" -H "Authorization: Bearer $TOKEN_B"`
+   The status MUST be `403`. Then read session A with no token at all and
+   assert `401`. Then read it with `TOKEN_A`, save the transcript to
+   `$ARTIFACTS_DIR/test-conversation-history-transcript.txt`, and assert
+   `200` with the greeting, the Arabic client turn and the agent answer
+   listed in `turns`.
+9. `DELETE` both sessions with their own tokens.
+10. Write a markdown summary to `$ARTIFACTS_DIR/test-conversation-history.md`
+    including the detected languages, the verbatim `turn` frame from the
+    Spanish turn, the three status codes from step 8, and the evidence
+    paths.
 
 ---
 
