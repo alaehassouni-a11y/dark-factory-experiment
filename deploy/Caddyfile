@@ -1,14 +1,23 @@
 {
-    email ops@example.com
+    email {$LETSENCRYPT_EMAIL}
 }
 
-# Replace agent.example.com and ops@example.com with the real hostname and Let's Encrypt contact before the first deploy.
-agent.example.com {
+# The hostname and the Let's Encrypt contact are NOT in this file. They come from
+# the host's .env (VIRTUALAGENT_HOST, LETSENCRYPT_EMAIL), which docker-compose.yml
+# passes into the container and Caddy substitutes at load time, so this file is
+# identical on every host and nothing deployment-specific is committed. Compose
+# refuses to start Caddy with either unset (`:?` in docker-compose.yml): a
+# missing hostname is a loud failure at `up`, not a placeholder that routes nothing.
+#
+# Changing either value later means recreating the container, not reloading it:
+#   docker compose --env-file /opt/virtualagent/.env up -d caddy
+{$VIRTUALAGENT_HOST} {
     encode zstd gzip
 
     # Which app container is live is decided by upstream.conf, which the
-    # deploy script (/opt/virtualagent/deploy.sh) rewrites on each blue/green
-    # swap and then triggers a graceful `caddy reload`. FastAPI serves only
-    # /api/* — the iOS app is the sole client and there are no static assets.
+    # deploy script (deploy/deploy.sh, mirrored to the host) rewrites on each
+    # blue/green swap and then triggers a graceful `caddy reload`. FastAPI
+    # serves only /api/* — the iOS app is the sole client and there are no
+    # static assets.
     import /etc/caddy/upstream.conf
 }

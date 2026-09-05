@@ -3,6 +3,13 @@ services:
     image: caddy:2.8-alpine
     container_name: virtualagent-caddy
     restart: unless-stopped
+    environment:
+      # Substituted into Caddyfile by Caddy at load ({$VIRTUALAGENT_HOST},
+      # {$LETSENCRYPT_EMAIL}). `:?` makes compose refuse to start with either
+      # unset, which is the loud failure; a committed placeholder hostname that
+      # routes nothing was the quiet one.
+      VIRTUALAGENT_HOST: ${VIRTUALAGENT_HOST:?set VIRTUALAGENT_HOST in the .env file - the public hostname Caddy serves}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL:?set LETSENCRYPT_EMAIL in the .env file - the Let's Encrypt contact address}
     ports:
       - "80:80"
       - "443:443"
@@ -34,7 +41,7 @@ services:
     environment:
       # Required. OpenRouter is the only inference provider (chat + the
       # embeddings that index the wiki). The service refuses to start without it.
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in the .env file - the service refuses to start without it}
       # Optional. Brave Search key for the web fallback. Unset means the agent
       # says it does not know when the wiki has no confident answer.
       BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY:-}
@@ -67,7 +74,7 @@ services:
     container_name: virtualagent-app-green
     restart: unless-stopped
     environment:
-      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in the .env file - the service refuses to start without it}
       BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY:-}
       WIKI_RESOURCES_DIR: /app/virtualagent/resources
       CORS_ORIGINS: ${CORS_ORIGINS:-}

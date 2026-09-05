@@ -23,9 +23,24 @@
 
 set -uo pipefail
 
-REPO="${FACTORY_REPO:-coleam00/dark-factory-experiment}"
+# The repository whose issues carry the label: FACTORY_REPO if set, else the origin
+# remote of the working copy. Not a hardcoded slug - this repository is a fork, and
+# a stop label on the upstream's issues is not this factory's stop button. No
+# repository at all counts as stopped, like every other unreadable state below.
+# The lookup runs in FACTORY_WORKDIR if set, else in this script's own directory,
+# which is inside the clone wherever the orchestrator's cwd happens to be.
+repo_from_origin() {
+  git -C "${FACTORY_WORKDIR:-$(dirname "${BASH_SOURCE[0]}")}" remote get-url origin 2>/dev/null \
+    | sed -E 's#^(git@github\.com:|ssh://git@github\.com/|https://github\.com/)##; s#/$##; s#\.git$##'
+}
+REPO="${FACTORY_REPO:-$(repo_from_origin)}"
 KILL_FILE="${FACTORY_KILL_FILE:-${FACTORY_WORKDIR:-.}/.factory-stop}"
 STOP_LABEL="factory:stop"
+
+if [ -z "$REPO" ]; then
+  echo "STOPPED: cannot tell which repository to check (no FACTORY_REPO and no origin remote in ${FACTORY_WORKDIR:-.}), halting."
+  exit 1
+fi
 
 # --- 1. the local half -------------------------------------------------------
 if [ -f "$KILL_FILE" ]; then
@@ -49,10 +64,10 @@ if ! HITS=$(gh issue list -R "$REPO" --label "$STOP_LABEL" --state open \
 fi
 
 if [ -n "$HITS" ]; then
-  echo "STOPPED: an open issue carries $STOP_LABEL"
+  echo "STOPPED: an open issue in $REPO carries $STOP_LABEL"
   echo "$HITS" | sed 's/^/  /'
   exit 1
 fi
 
-echo "STOP_CHECK_OK: no kill file, no $STOP_LABEL issue"
+echo "STOP_CHECK_OK: no kill file, no $STOP_LABEL issue in $REPO"
 exit 0
