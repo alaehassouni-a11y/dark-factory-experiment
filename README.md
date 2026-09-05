@@ -141,13 +141,13 @@ compressed to what the factory has to obey.
                                                 │  split into sentences        │
                                                 └──────────────────────────────┘
                                                         ▲
-                                          virtualagent/resources/*.md, *.txt
-                                          (indexed at startup, baked into the image)
+                                          the wiki folder: *.md, *.txt
+                                          (indexed at startup, watched for changes)
 ```
 
 - **Client:** a native SwiftUI iPhone app under `app/ios/`, no third-party dependencies. The device does the listening and the speaking; the service decides what is said and in which voice locale.
 - **Service:** one Python 3.11 FastAPI process under `app/backend/`, managed with `uv`. No database: sessions and the daily turn counter live in process.
-- **Wiki:** every `.md` and `.txt` file under `virtualagent/resources/`, chunked and indexed at startup (BM25 over words plus cosine over embeddings, fused with reciprocal rank fusion). Adding a file to the folder is the only way the wiki grows.
+- **Wiki:** every `.md` and `.txt` file in the wiki folder, `virtualagent/resources/` by default, chunked and indexed at startup and re-indexed within seconds whenever a file is added, changed or removed (BM25 over words plus cosine over embeddings, fused with reciprocal rank fusion). Adding a file to the folder is the only way the wiki grows; `tools/wiki/ingest.py` turns Word, PDF, HTML and spreadsheets into files for it.
 - **Inference:** OpenRouter only - `anthropic/claude-sonnet-4.6` for answers, `openai/text-embedding-3-small` for the index.
 - **Web fallback:** Brave Search, in the client's language, only when the wiki has no confident answer.
 - **API:** documented in [`docs/API.md`](docs/API.md). Every agent turn streams as Server-Sent Events: the detected language first, then tokens, a `sentence` event each time one completes (the app speaks it immediately), the sources, and a closing `turn` that declares `wiki`, `web` or `none`.
@@ -195,6 +195,14 @@ curl -s -X POST http://localhost:8000/api/sessions -H 'Content-Type: application
 
 Then send a turn with the returned token as a bearer token and watch the stream (see `docs/API.md`).
 
+Or use the developer console, a single static page that types or listens, streams the answer, speaks each sentence as it arrives and shows every turn's source. Serve it on a fixed origin and allow that origin on the service:
+
+```bash
+python -m http.server 8080 --directory tools/dev-console
+```
+
+with `CORS_ORIGINS=http://localhost:8080` in `app/.env`, then open http://localhost:8080. It is a tool for people testing the service, not a client of the product; the iOS app remains the only client.
+
 ### Run the app
 
 See [`app/ios/README.md`](app/ios/README.md): `xcodegen generate`, open the project, run on a simulator or an iPhone pointed at the service's LAN address. The app has not yet been compiled on a Mac; expect to fix the first build.
@@ -217,6 +225,6 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy . && uv run p
 
 You contribute to this repo the same way the factory does: **file an issue.** Don't open a PR - the factory will. If your issue is well-scoped and in line with `MISSION.md`, the next triage cycle will accept it, and a workflow run will open the implementing PR. If it gets rejected, read the comment, sharpen the issue, and reopen.
 
-To teach the agent something, add a Markdown file to `virtualagent/resources/` and open an issue asking for it to be merged; a merge to `main` is a deploy.
+To teach the agent something, put a document in the wiki folder; the running service picks it up within seconds. `tools/wiki/ingest.py` converts Word, PDF, HTML and spreadsheets into the folder's format. In this repository `virtualagent/resources/` holds the default wiki and the samples; in production the folder lives on the host.
 
 That's the whole point of the experiment.

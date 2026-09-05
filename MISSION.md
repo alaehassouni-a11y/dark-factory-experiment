@@ -1,7 +1,7 @@
 # Mission
 
 **Derived from:** `docs/virtualagent.prd.md`
-**Last reconciled with that PRD:** 2026-09-03
+**Last reconciled with that PRD:** 2026-09-06
 
 > This file is the PRD compressed to the part the factory has to obey. When the product
 > changes, both files change in the same commit - otherwise the factory keeps faithfully
@@ -10,7 +10,7 @@
 
 ## What the Virtual Agent Is
 
-The Virtual Agent is a spoken assistant for a business's clients. A client opens the iOS app, speaks or types in French, English, German or Arabic, and the agent answers aloud in that language, live, from a wiki built out of the `virtualagent/resources` folder in this repository. When the wiki does not cover the question the agent searches the web and says so. When neither does, it says it does not know. It also asks questions: how it can help, what the client meant, which supported language to continue in.
+The Virtual Agent is a spoken assistant for a business's clients. A client opens the iOS app, speaks or types in French, English, German or Arabic, and the agent answers aloud in that language, live, from a wiki built out of a folder of documents (`virtualagent/resources` in this repository by default; a folder on the host in production, watched for changes). When the wiki does not cover the question the agent searches the web and says so. When neither does, it says it does not know. It also asks questions: how it can help, what the client meant, which supported language to continue in.
 
 One wiki, one deployment, one iOS client.
 
@@ -38,9 +38,10 @@ The Virtual Agent is not an operator tool, a general-purpose assistant, a chat p
 - Supported languages: French, English, German, Arabic (see Hard Invariants)
 
 **Wiki knowledge**
-- The wiki is built from every Markdown and plain-text file under `virtualagent/resources`
+- The wiki is built from every Markdown and plain-text file in the wiki folder: `virtualagent/resources` in this repository by default, a folder on the host in production
+- The service watches the folder and re-indexes when a file is added, changed or removed; a wiki change is not a deploy
 - The agent answers from the wiki whenever the wiki covers the question and names the document it drew from
-- Adding a file to the folder is the only authoring path
+- Adding a file to the folder is the only authoring path; `tools/wiki` converts other document formats into files for it
 
 **Web fallback**
 - When the wiki has no confident answer the agent searches the web, answers from the results, and names the pages

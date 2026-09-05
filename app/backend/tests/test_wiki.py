@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from backend.wiki.index import WikiIndex, chunk_document
+from backend.wiki.index import WikiIndex, chunk_document, content_stems, stem
 from conftest import FakeLLM
 
 
@@ -29,6 +29,55 @@ async def test_french_question_matches_french_document(wiki: WikiIndex) -> None:
 async def test_uncovered_question_is_not_confident(wiki: WikiIndex) -> None:
     hits = await wiki.search("Who painted the Mona Lisa in Florence?")
     assert not wiki.is_confident(hits)
+
+
+async def test_paraphrased_question_still_matches_the_document(tmp_path: Path) -> None:
+    """The client does not use the document's words. Inflections (garantie / garantis,
+    produits / produit) and question words (combien de temps dure) must not hide it."""
+    (tmp_path / "garantie.md").write_text(
+        "# Garantie des produits\n\nTous nos produits sont garantis deux ans. "
+        "La reparation est gratuite en magasin.\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "horaires.md").write_text(
+        "# Horaires\n\nNous sommes ouverts de neuf heures a dix-huit heures.\n", encoding="utf-8"
+    )
+    index = await WikiIndex.build(tmp_path, FakeLLM())
+    for question in (
+        "Combien de temps dure la garantie de vos produits ?",
+        "Quelle est la durée de la garantie ?",
+        "Est-ce que le produit est garanti ?",
+        "Y a-t-il une garantie ?",
+        "A quelle heure ouvrez-vous ?",
+    ):
+        hits = await index.search(question)
+        assert hits and index.is_confident(hits), question
+    assert (await index.search("Combien de temps dure la garantie ?"))[
+        0
+    ].chunk.location == "garantie.md"
+    assert (await index.search("A quelle heure ouvrez-vous ?"))[0].chunk.location == "horaires.md"
+    unrelated = await index.search("Qui a peint la Joconde ?")
+    assert not index.is_confident(unrelated)
+
+
+def test_stems_merge_inflections_in_the_four_languages() -> None:
+    assert stem("garantie") == stem("garantis") == stem("garanti")
+    assert stem("produits") == stem("produit")
+    assert stem("hours") == stem("hour")
+    assert stem("offnungszeiten") == stem("offnungszeit")
+    assert stem("ساعات") == stem("ساعة") == stem("الساعات")
+    assert stem("open") == "open" and stem("bus") == "bus", "short words are left alone"
+
+
+def test_content_stems_drop_question_words_and_tiny_tokens() -> None:
+    assert content_stems(["combien", "de", "temps", "dure", "la", "garantie"]) == [
+        "temp",
+        "dure",
+        "garant",
+    ]
+    assert content_stems(["y", "a", "t", "il", "une", "garantie"]) == ["garant"]
+    assert content_stems(["how", "long", "is", "the", "warranty"]) == ["warran"]
+    assert content_stems(["كم", "ساعات", "العمل"]) == ["ساع", "عمل"]
 
 
 async def test_empty_folder_indexes_nothing(tmp_path: Path) -> None:

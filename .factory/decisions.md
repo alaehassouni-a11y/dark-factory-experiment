@@ -151,3 +151,28 @@ This is not a code defect and the factory cannot fix it: the folder is the autho
 surface and only the business knows what belongs in it. **Recommendation:** the human
 adds the documents, in whichever of the four languages they exist, one topic per file
 with a `#` heading. A merge to `main` is a deploy.
+
+---
+
+## D-008 · The wiki is a folder the service watches, not part of the release
+
+**Status:** decided by the owner · **Raised:** 2026-09-06 · **Kind:** product
+
+The first version baked `virtualagent/resources` into the image, so every document was a
+commit, a merge and a blue/green swap: reviewable, but ten minutes and a release per
+change. The owner asked for a wiki that is not part of the code: an external folder in a
+predefined format the service can search, and a way to turn any file into that format.
+
+**Decided:** the service watches its wiki folder (`WIKI_POLL_SECONDS`, default 10) and
+re-indexes in the background when a file is added, changed or removed, re-embedding only
+the chunks whose text changed and swapping the index in atomically; a failed rebuild keeps
+the previous index. In production the folder is a host directory (`WIKI_DIR`) mounted
+read-only into both colours; in the repository `virtualagent/resources` stays as the
+default and the samples. The knowledge format is written down in that folder's README, and
+`tools/wiki/ingest.py` converts Word, PDF, PowerPoint, Excel, CSV, HTML and text into it,
+one file per topic, in its own uv project so the service keeps its five dependencies.
+
+The PRD and MISSION.md changed in the same commit. What did not change: adding a file to
+the folder is still the only authoring path, there is still no upload surface, and the
+agent still names the document it answered from. What was given up: a wiki change is no
+longer a commit anyone reviews, unless the folder is also kept in git by habit.

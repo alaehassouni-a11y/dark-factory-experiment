@@ -25,7 +25,9 @@ no token gets `401`; a request with a token that belongs to a different session 
 
 ### `GET /api/health`
 
-Reports that the service is up and that the wiki loaded.
+Reports that the service is up and that the wiki loaded. `wiki_indexed_at` moves whenever
+the service re-indexes the folder after a file was added, changed or removed; the wiki is
+watched, not deployed.
 
 **Response `200`:**
 ```json
@@ -33,6 +35,7 @@ Reports that the service is up and that the wiki loaded.
   "status": "ok",
   "wiki_documents": 3,
   "wiki_chunks": 27,
+  "wiki_indexed_at": "2026-09-06T09:12:03Z",
   "languages": ["ar", "de", "en", "fr"],
   "web_search": "configured"
 }

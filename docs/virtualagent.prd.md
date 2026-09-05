@@ -81,10 +81,16 @@ which one they are using. The client speaks or types; both reach the same agent.
 says and answers in it. It follows the client if they switch mid-session. The supported
 set is French, English, German and Arabic, and nothing else.
 
-**Wiki knowledge.** The wiki is built from the `virtualagent/resources` folder in this
-repository. Adding a document to that folder is how the wiki grows; there is no other
-authoring surface. The agent answers from the wiki whenever the wiki covers the
-question, and says which document it drew from.
+**Wiki knowledge.** The wiki is a folder of documents the service is pointed at:
+`virtualagent/resources` in this repository by default and for the samples, a folder on
+the server in production. The service watches that folder and re-indexes within seconds
+when a file is added, changed or removed; a wiki change is not a release. Adding a
+document to the folder is how the wiki grows; there is no other authoring surface. A
+converter (`tools/wiki`) turns Word, PDF, HTML and spreadsheets into the folder's format,
+and what it produces is still a file in the folder. The agent answers from the wiki
+whenever the wiki covers the question, and says which document it drew from. *Changed by
+the owner 2026-09-06 (D-008): the first version kept the folder inside the repository, so
+every document was a deploy.*
 
 **Web fallback.** When the wiki does not cover the question, the agent searches the web
 and answers from what it finds, saying so and naming the pages. When neither the wiki
@@ -149,8 +155,8 @@ the file read at reject time has to contain the rule.
 - A client speaks a question and hears the answer in the same language. That is the
   whole funnel.
 - Most answers come from the wiki, and every web answer is visibly a web answer.
-- Adding a file to `virtualagent/resources` is all it takes for the agent to know
-  something new.
+- Adding a file to the wiki folder is all it takes for the agent to know something new,
+  within seconds, with nothing shipped.
 
 ## Open questions
 

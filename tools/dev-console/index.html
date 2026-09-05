@@ -1,0 +1,373 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Virtual Agent – developer console</title>
+<link rel="icon" href="data:,">
+<!--
+  A DEVELOPER CONSOLE for the service, not a client of the product. MISSION.md forbids any
+  client other than the iOS app; this page exists so a person at a desk can exercise the
+  API in docs/API.md the way the app does, hear the sentences spoken as they arrive, and
+  read the declared source of every turn. It is one static file with no build step.
+
+  Serve it from any static server on a fixed origin and allow that origin on the service:
+
+      python -m http.server 8080 --directory tools/dev-console
+      CORS_ORIGINS=http://localhost:8080  (in app/.env, or the environment of serve.py)
+
+  Speech uses the browser's own engines: speechSynthesis for output (every browser) and
+  webkitSpeechRecognition for input (Chrome and Edge). Neither touches the service.
+-->
+<style>
+  :root { color-scheme: light dark; --bg: #f6f6f4; --fg: #1d1d1b; --muted: #6b6b66; --line: #d9d9d4;
+          --agent: #ffffff; --client: #dfeeff; --accent: #2f6fdb; --warn: #b3261e; --wiki: #1f7a3a; --web: #9a5b00; --none: #6b6b66; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --fg: #ececea; --muted: #9a9a94; --line: #3a3a37; --agent: #22221f; --client: #1f3550;
+            --accent: #7aa7ff; --warn: #ff8a80; --wiki: #6fd08c; --web: #ffc36b; --none: #9a9a94; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: .6rem 1rem; align-items: center; padding: .8rem 1rem; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 1rem; margin: 0 1rem 0 0; font-weight: 600; }
+  header label { color: var(--muted); font-size: .85rem; display: flex; align-items: center; gap: .35rem; }
+  input, select, button, textarea { font: inherit; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: .35rem .55rem; }
+  button { cursor: pointer; } button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  main { max-width: 860px; margin: 0 auto; padding: 1rem; }
+  #status { color: var(--muted); font-size: .85rem; min-height: 1.2em; margin-bottom: .6rem; }
+  #status.error { color: var(--warn); }
+  #transcript { display: flex; flex-direction: column; gap: .6rem; min-height: 40vh; }
+  .msg { max-width: 78%; padding: .6rem .8rem; border-radius: 12px; border: 1px solid var(--line); white-space: pre-wrap; }
+  .msg.agent { align-self: flex-start; background: var(--agent); }
+  .msg.client { align-self: flex-end; background: var(--client); }
+  .meta { font-size: .78rem; color: var(--muted); margin-top: .4rem; display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+  .badge { border-radius: 999px; padding: .05rem .5rem; border: 1px solid currentColor; font-weight: 600; }
+  .badge.wiki { color: var(--wiki); } .badge.web { color: var(--web); } .badge.none { color: var(--none); }
+  .sources { margin: .3rem 0 0; padding-left: 1.1rem; font-size: .82rem; color: var(--muted); }
+  .sources li { margin: .15rem 0; }
+  .streaming::after { content: "▍"; animation: blink 1s steps(2) infinite; color: var(--muted); }
+  @keyframes blink { 50% { opacity: 0; } }
+  footer { position: sticky; bottom: 0; background: var(--bg); border-top: 1px solid var(--line); padding: .8rem 1rem; }
+  footer .row { max-width: 860px; margin: 0 auto; display: flex; gap: .5rem; align-items: flex-end; }
+  textarea { flex: 1; resize: none; min-height: 2.4rem; max-height: 8rem; }
+  #mic.listening { border-color: var(--warn); color: var(--warn); }
+  #lang { font-weight: 600; }
+  .hint { color: var(--muted); font-size: .8rem; max-width: 860px; margin: .4rem auto 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Virtual Agent · developer console</h1>
+  <label>Service <input id="url" size="24" value="http://localhost:8000"></label>
+  <label>Hint
+    <select id="hint">
+      <option value="">device / none</option>
+      <option value="fr">fr</option><option value="en">en</option><option value="de">de</option><option value="ar">ar</option>
+    </select>
+  </label>
+  <label><input id="speak" type="checkbox" checked> speak sentences aloud</label>
+  <button id="testvoice" title="Speak one sentence so you can check the sound">🔊 Test voice</button>
+  <button id="new" class="primary">New session</button>
+  <span id="lang" title="language of the session"></span>
+</header>
+
+<main>
+  <div id="status"></div>
+  <div id="speech" class="hint" style="margin:0 0 .6rem"></div>
+  <div id="transcript"></div>
+</main>
+
+<footer>
+  <div class="row">
+    <button id="mic" title="Listen (Chrome / Edge)">🎤</button>
+    <textarea id="text" rows="1" placeholder="Type what the client says, or press the microphone… (Enter sends)"></textarea>
+    <button id="send" class="primary">Send</button>
+  </div>
+  <p class="hint">Every agent turn shows its <b>kind</b> and its <b>source</b>: wiki, web or none. Sentences are spoken by the browser as each one completes, before the answer has finished streaming.</p>
+</footer>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const urlEl = $('url'), hintEl = $('hint'), speakEl = $('speak'), langEl = $('lang'), statusEl = $('status');
+  const transcript = $('transcript'), textEl = $('text'), micBtn = $('mic'), sendBtn = $('send');
+
+  const LOCALES = { fr: 'fr-FR', en: 'en-US', de: 'de-DE', ar: 'ar-SA' };
+  let session = null;          // { id, token }
+  let language = null;         // session language code, or null
+  let voiceLocale = 'en-US';   // what the recogniser listens in
+  let busy = false;
+
+  // A stable client id, like the app keeps one: the daily cap is counted per client.
+  let clientId = localStorage.getItem('va_client_id');
+  if (!clientId) { clientId = (crypto.randomUUID ? crypto.randomUUID() : String(Math.random()).slice(2)); localStorage.setItem('va_client_id', clientId); }
+  urlEl.value = localStorage.getItem('va_service_url') || urlEl.value;
+  urlEl.addEventListener('change', () => localStorage.setItem('va_service_url', urlEl.value.trim()));
+
+  // The hint is what the app sends as language_hint: the language of the greeting and of the
+  // microphone until the agent detects one from what the client says. Default to the
+  // browser's language when it is one of the four (the app uses the device language), remember
+  // the choice, and open a new session the moment it changes - a hint that only applies to
+  // the next session someone remembers to open is a hint nobody sees.
+  const browserLang = (navigator.language || '').slice(0, 2).toLowerCase();
+  hintEl.value = localStorage.getItem('va_hint') ?? (LOCALES[browserLang] ? browserLang : '');
+  hintEl.addEventListener('change', () => { localStorage.setItem('va_hint', hintEl.value); newSession(); });
+
+  const setStatus = (text, isError = false) => { statusEl.textContent = text || ''; statusEl.className = isError ? 'error' : ''; };
+  const setLanguage = (code, { hinted = false } = {}) => {
+    language = code;
+    voiceLocale = LOCALES[code] || voiceLocale;
+    langEl.textContent = code
+      ? `language: ${code} (${voiceLocale})${hinted ? ', from the hint' : ''}`
+      : `language: not yet detected (microphone in ${voiceLocale})`;
+    micBtn.title = `Listen in ${voiceLocale} (Chrome / Edge)`;
+  };
+
+  // ---- speech output: the browser speaks each sentence in the locale the service names
+  //
+  // Two things silence a page like this, and both are the browser's doing, not the
+  // service's: (1) no browser will speak before the person has clicked or typed on the
+  // page, so a greeting spoken at load is dropped; (2) a sentence in a language with no
+  // installed voice has nothing to speak with (Windows: Settings > Time & Language >
+  // Speech > Add voices). The speech line below says which one is happening.
+  const speechEl = $('speech');
+  const synth = 'speechSynthesis' in window ? window.speechSynthesis : null;
+  let unlocked = false;               // has the page had a user gesture yet?
+  let pendingGreeting = null;         // greeting we could not speak before the first gesture
+  let lastSpeechError = '';
+  const voices = () => synth ? synth.getVoices() : [];
+  const voiceFor = (lang) => {
+    const list = voices();
+    const norm = (l) => (l || '').replace('_', '-').toLowerCase();
+    return list.find(v => norm(v.lang) === norm(lang)) || list.find(v => norm(v.lang).split('-')[0] === norm(lang).split('-')[0]) || null;
+  };
+  const describeSpeech = () => {
+    if (!synth) { speechEl.textContent = 'Speech output: not available in this browser.'; return; }
+    const list = voices();
+    const langs = [...new Set(list.map(v => v.lang.replace('_', '-')))].sort();
+    const missing = Object.entries(LOCALES).filter(([, loc]) => !voiceFor(loc)).map(([code]) => code);
+    let s = `Speech output: ${list.length} voice${list.length === 1 ? '' : 's'} installed` + (langs.length ? ` (${langs.join(', ')})` : '') + '.';
+    if (missing.length) s += ` No voice for ${missing.join(', ')}: those sentences will be silent or spoken by the default voice. Windows: Settings > Time & Language > Speech > Add voices.`;
+    if (!unlocked) s += ' Audio is locked until you click or type on the page (a browser rule); the greeting will be spoken then.';
+    if (lastSpeechError) s += ` Last error: ${lastSpeechError}.`;
+    if (!speakEl.checked) s += ' Speaking is switched off.';
+    speechEl.textContent = s;
+  };
+  const speak = (text, locale, { isGreeting = false } = {}) => {
+    if (!speakEl.checked || !synth) return;
+    if (!unlocked) { if (isGreeting) pendingGreeting = { text, locale }; describeSpeech(); return; }
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = locale || voiceLocale;
+    const voice = voiceFor(u.lang);
+    if (voice) u.voice = voice;
+    u.onerror = (ev) => { lastSpeechError = `${ev.error} while speaking "${text.slice(0, 40)}"`; describeSpeech(); };
+    if (synth.paused) synth.resume();
+    synth.speak(u);
+  };
+  const unlock = () => {
+    if (unlocked) return;
+    unlocked = true;
+    if (pendingGreeting) { const g = pendingGreeting; pendingGreeting = null; speak(g.text, g.locale); }
+    describeSpeech();
+  };
+  ['pointerdown', 'keydown'].forEach(ev => document.addEventListener(ev, unlock, { capture: true }));
+  if (synth) { synth.getVoices(); synth.addEventListener('voiceschanged', describeSpeech); }
+  speakEl.addEventListener('change', describeSpeech);
+  $('testvoice').addEventListener('click', () => {
+    unlock();
+    const loc = LOCALES[language] || 'en-US';
+    const line = { 'fr-FR': 'Bonjour, ceci est un test de la voix.', 'de-DE': 'Hallo, dies ist ein Sprachtest.', 'ar-SA': 'مرحبا، هذا اختبار للصوت.' }[loc] || 'Hello, this is a voice test.';
+    if (!synth) { setStatus('This browser has no speech synthesis.', true); return; }
+    if (!speakEl.checked) { setStatus('Tick "speak sentences aloud" first.', true); return; }
+    lastSpeechError = '';
+    speak(line, loc);
+    setStatus(`Speaking a test sentence in ${loc}${voiceFor(loc) ? ' with ' + voiceFor(loc).name : ' (no matching voice installed; the default voice will try)'}. If you hear nothing, check the system volume and the browser tab is not muted.`);
+  });
+  describeSpeech();
+
+  // ---- transcript rendering
+  const addMessage = (role, text) => {
+    const el = document.createElement('div');
+    el.className = `msg ${role}`;
+    el.textContent = text;
+    transcript.appendChild(el);
+    el.scrollIntoView({ block: 'end' });
+    return el;
+  };
+  const addMeta = (msgEl, turn, sources) => {
+    const meta = document.createElement('div');
+    meta.className = 'meta';
+    if (turn) {
+      const kind = document.createElement('span'); kind.textContent = turn.kind.replace('_', ' ');
+      const src = document.createElement('span'); src.className = `badge ${turn.source}`; src.textContent = `source: ${turn.source}`;
+      meta.append(kind, src);
+    }
+    msgEl.appendChild(meta);
+    if (sources && sources.length) {
+      const ul = document.createElement('ul'); ul.className = 'sources';
+      for (const s of sources) {
+        const li = document.createElement('li');
+        const ref = s.kind === 'wiki' ? s.location : s.url;
+        li.textContent = `${s.kind}: ${s.title}${ref ? ' — ' + ref : ''}`;
+        ul.appendChild(li);
+      }
+      msgEl.appendChild(ul);
+    }
+  };
+
+  // ---- HTTP helpers
+  const base = () => urlEl.value.trim().replace(/\/+$/, '');
+  const explain = async (res) => {
+    let body = {};
+    try { body = await res.json(); } catch {}
+    const detail = typeof body.detail === 'string' ? body.detail : '';
+    switch (res.status) {
+      case 401: return 'Refused: no session token (401).';
+      case 403: return 'Refused: this token belongs to another session (403).';
+      case 404: return 'Unknown session (404). It may have expired; start a new one.';
+      case 422: return `Rejected (422): ${detail || 'empty text'}.`;
+      case 429: return `Daily turn cap reached (429). Resets at ${body.resets_at || '?'}.`;
+      default: return `HTTP ${res.status}${detail ? ': ' + detail : ''}.`;
+    }
+  };
+
+  async function newSession() {
+    synth && synth.cancel();
+    transcript.innerHTML = '';
+    session = null;
+    setLanguage(null);
+    setStatus('Opening a session…');
+    try {
+      const res = await fetch(`${base()}/api/sessions`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: clientId, language_hint: hintEl.value || null }),
+      });
+      if (res.status !== 201) { setStatus(await explain(res), true); return; }
+      const data = await res.json();
+      session = { id: data.session_id, token: data.session_token };
+      // No hint: listen in the browser's language if it is one of the four, else English,
+      // until the first `language` event - the same rule the app applies with the device locale.
+      voiceLocale = LOCALES[data.language] || LOCALES[browserLang] || LOCALES.en;
+      setLanguage(data.language, { hinted: !!data.language });
+      const g = data.greeting;
+      const el = addMessage('agent', g.text);
+      addMeta(el, { kind: 'question', source: 'none' }, []);
+      speak(g.text, g.voice_locale, { isGreeting: true });
+      setStatus(`Session ${session.id} open. Greeting and microphone in ${voiceLocale}; the agent follows whatever language you actually use.`);
+    } catch (e) {
+      setStatus(`Cannot reach ${base()} — is the service running, and is this page's origin in CORS_ORIGINS? (${e.message})`, true);
+    }
+  }
+
+  // ---- one turn: POST, then read the SSE stream exactly as docs/API.md frames it
+  async function sendTurn(text) {
+    text = text.trim();
+    if (!text || busy) return;
+    if (!session) { await newSession(); if (!session) return; }
+    busy = true; sendBtn.disabled = true;
+    synth && synth.cancel();
+    addMessage('client', text);
+    const reply = addMessage('agent', '');
+    reply.classList.add('streaming');
+    setStatus('…');
+    let sources = [], turn = null;
+    try {
+      const res = await fetch(`${base()}/api/sessions/${session.id}/turns`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream', 'Authorization': `Bearer ${session.token}` },
+        body: JSON.stringify({ text }),
+      });
+      if (res.status !== 200) {
+        setStatus(await explain(res), true);
+        if ([401, 403, 404].includes(res.status)) session = null;
+        reply.remove();
+        return;
+      }
+      const reader = res.body.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      const handle = (block) => {
+        let event = null; const data = [];
+        for (const line of block.split('\n')) {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          else if (line.startsWith('data:')) data.push(line.slice(5).replace(/^ /, ''));
+        }
+        if (!data.length) return false;
+        const payload = data.join('\n');
+        if (event === null && payload === '[DONE]') return true;
+        if (event === null) { let tok; try { tok = JSON.parse(payload); } catch { tok = payload; } reply.textContent += tok; return false; }
+        const obj = JSON.parse(payload);
+        if (event === 'language') { if (obj.language) setLanguage(obj.language); else setStatus('The client was not understood as any supported language; the agent asks, in English, to continue in one of the four.'); }
+        else if (event === 'sentence') speak(obj.text, obj.voice_locale);
+        else if (event === 'sources') sources = obj;
+        else if (event === 'turn') turn = obj;
+        return false;
+      };
+      outer: while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf('\n\n')) !== -1) {
+          const block = buf.slice(0, i).replace(/\r/g, ''); buf = buf.slice(i + 2);
+          if (handle(block)) break outer;
+        }
+      }
+      reply.classList.remove('streaming');
+      addMeta(reply, turn, sources);
+      if (!statusEl.classList.contains('error')) setStatus(`Turn closed: ${turn ? turn.kind + ' / ' + turn.source : 'no turn event'}.`);
+    } catch (e) {
+      reply.classList.remove('streaming');
+      setStatus(`Stream failed: ${e.message}`, true);
+    } finally {
+      busy = false; sendBtn.disabled = false; textEl.focus();
+    }
+  }
+
+  // ---- speech input: the browser listens in the session's voice locale
+  let recog = null;
+  const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!Recognition) {
+    micBtn.disabled = true;
+    micBtn.title = 'Speech recognition is not available in this browser; Chrome and Edge have it';
+    setStatus('Speech recognition is not available in this browser. Chrome and Edge have it; typing works everywhere.');
+  }
+  const RECOGNITION_ERRORS = {
+    'not-allowed': 'the browser refused the microphone. Allow it for this site (the icon in the address bar) and try again',
+    'service-not-allowed': 'the browser refused the speech service',
+    'audio-capture': 'no microphone was found',
+    'no-speech': 'nothing was heard; speak within a few seconds of pressing the button',
+    'network': 'speech recognition needs the browser\'s online service (Chrome and Edge send audio to their servers); check the connection',
+    'language-not-supported': 'the browser cannot recognise this language',
+    'aborted': 'listening was stopped',
+  };
+  micBtn.addEventListener('click', () => {
+    if (recog) { recog.stop(); return; }
+    recog = new Recognition();
+    recog.lang = voiceLocale;
+    recog.interimResults = true;
+    micBtn.classList.add('listening'); setStatus(`Listening in ${recog.lang}… speak now, then pause.`);
+    recog.onresult = (ev) => {
+      const t = Array.from(ev.results).map(r => r[0].transcript).join(' ');
+      textEl.value = t;
+      if (ev.results[ev.results.length - 1].isFinal) { recog.stop(); }
+    };
+    recog.onerror = (ev) => setStatus(`Microphone: ${RECOGNITION_ERRORS[ev.error] || ev.error}.`, true);
+    recog.onend = () => {
+      micBtn.classList.remove('listening'); recog = null;
+      const heard = textEl.value.trim();
+      if (heard) { textEl.value = ''; sendTurn(heard); } else if (!statusEl.classList.contains('error')) setStatus('');
+    };
+    recog.start();
+  });
+
+  // ---- wiring
+  $('new').addEventListener('click', newSession);
+  sendBtn.addEventListener('click', () => { const t = textEl.value; textEl.value = ''; sendTurn(t); });
+  textEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendBtn.click(); } });
+  newSession();
+})();
+</script>
+</body>
+</html>

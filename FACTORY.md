@@ -28,7 +28,7 @@ application did not. Every number below was re-measured against the new product.
 |---|---|---|
 | 1 | Workflow-driven repo | **Archon**, four YAML workflows in `.archon/workflows/`. State in GitHub labels |
 | 2 | The trigger | Pure-bash orchestrator on the VPS at `/opt/dark-factory/orchestrator.sh`, cron every 30 min, `MAX_PARALLEL=4` with per-target locks |
-| 3 | Deployment | `deploy/deploy.sh` - polls `main`, rebuilds the inactive colour (the image carries the wiki), waits for the Docker healthcheck (which passes only once the wiki is indexed), swaps the Caddy upstream. Rollback is flipping it back |
+| 3 | Deployment | `deploy/deploy.sh` - polls `main`, rebuilds the inactive colour, waits for the Docker healthcheck (which passes only once the wiki is indexed), swaps the Caddy upstream. Rollback is flipping it back. The live wiki is a host folder the service watches, mounted into both colours; documents do not go through this path |
 | 4 | Guidance layer | `MISSION.md` · `FACTORY_RULES.md` · `CLAUDE.md`, all three protected |
 | 5 | Validation harness | `harness/ci.py`, the whole gate, including the section 4 journey. See below |
 
@@ -75,7 +75,7 @@ the whole journey - and it is a smaller claim than "a client heard the answer".
 python harness/ci.py
   HARNESS_START mode=full driver=http
   STATIC_OK
-  UNIT_PASSED tests=52
+  UNIT_PASSED tests=68
   APP_STARTED port=61766
   E2E_PASSED steps=12
   HOLDOUT_PASSED scenarios=5 assertions=32
@@ -86,7 +86,7 @@ python harness/ci.py
   GATE_OK mode=full
 ```
 
-Measured 2026-09-04. Real, reproducible, and it needs no secrets: the stubs are an
+Measured 2026-09-06 (68 = 59 service tests + 9 for the wiki import tool). Real, reproducible, and it needs no secrets: the stubs are an
 OpenAI-shaped model and a Brave-shaped search, so **the gate proves the pipeline, not
 the providers.** What the real model says to a real client is the mocked-boundary
 policy in `CLAUDE.md`, and a person checks it on the host after a merge.

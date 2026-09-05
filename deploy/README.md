@@ -1,6 +1,6 @@
 # Deploy
 
-Production deployment via Docker Compose. Runs Caddy (TLS + reverse proxy) in front of two identical copies of the Virtual Agent service — `app-blue` and `app-green` — and swaps between them for zero-downtime deploys. There is no database, no migration step and no frontend build: the service is a single FastAPI process, its only client is the iOS app, and the wiki it answers from ships inside the image.
+Production deployment via Docker Compose. Runs Caddy (TLS + reverse proxy) in front of two identical copies of the Virtual Agent service — `app-blue` and `app-green` — and swaps between them for zero-downtime deploys. There is no database, no migration step and no frontend build: the service is a single FastAPI process, its only client is the iOS app, and the wiki it answers from is a folder on the host that the service watches.
 
 ## First-time setup on a new VPS
 
@@ -54,9 +54,10 @@ The containers read these from `/opt/virtualagent/.env` via docker-compose. The 
 | `CHAT_MODEL` | optional | OpenRouter chat model. Defaults to `anthropic/claude-sonnet-4.6`; set it to canary a new model on the inactive colour |
 | `CORS_ORIGINS` | optional | Comma-separated browser origins allowed to call the API. The iOS app needs none; leave empty |
 
+| `WIKI_DIR` | optional | The live wiki: a folder on this host, mounted read-only into both colours. Default: the checkout's `virtualagent/resources` |
+
 `WIKI_RESOURCES_DIR` is **not** set in `.env`. `docker-compose.yml` pins it to
-`/app/virtualagent/resources`, the copy of the wiki that `Dockerfile` bakes into
-the image, so the code and the knowledge it answers from always deploy together.
+`/app/virtualagent/resources` inside the container and mounts `WIKI_DIR` there.
 
 Minimal `.env` for a fresh deploy:
 
@@ -69,14 +70,24 @@ BRAVE_SEARCH_API_KEY=...
 
 Changing `VIRTUALAGENT_HOST` or `LETSENCRYPT_EMAIL` later means recreating the Caddy container (`docker compose --env-file /opt/virtualagent/.env up -d caddy`); a `caddy reload` re-reads the Caddyfile but not the container's environment.
 
-## The wiki deploys like code
+## The wiki is a folder on the host
 
-The agent's knowledge is every `.md` and `.txt` file under `virtualagent/resources/`
-at the repo root. The image copies that folder in at build time and the service
-indexes it at startup, so adding a document to the folder and merging to `main`
-*is* a deploy: `deploy.sh` builds a new image on the inactive colour, waits for
-its healthcheck (which only passes once the wiki is indexed), and flips Caddy.
-There is no upload path, no sync job and no volume to keep in step.
+The agent's knowledge is every `.md` and `.txt` file in `WIKI_DIR` (default: the
+checkout's `virtualagent/resources/`). Both colours mount it read-only, and the
+service watches it: a document added, changed or removed is re-indexed within
+`WIKI_POLL_SECONDS` (10) and answered from on the next question. Nothing is built,
+nothing is flipped, and a bad rebuild keeps the previous index.
+
+To add knowledge on the host, write the file there, or convert one:
+
+```bash
+uv run --project tools/wiki python tools/wiki/ingest.py brochure.pdf --out /opt/virtualagent/wiki
+```
+
+The format is described in `virtualagent/resources/README.md`. `/api/health` shows
+`wiki_documents` and `wiki_indexed_at`, so a dropped file is easy to confirm. The image
+still carries the repository's folder, so a host that sets no `WIKI_DIR` behaves as before:
+documents arrive with `git pull`.
 
 ## Secret hygiene
 
