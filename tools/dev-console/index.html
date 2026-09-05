@@ -105,11 +105,23 @@
   urlEl.value = localStorage.getItem('va_service_url') || urlEl.value;
   urlEl.addEventListener('change', () => localStorage.setItem('va_service_url', urlEl.value.trim()));
 
+  // The hint is what the app sends as language_hint: the language of the greeting and of the
+  // microphone until the agent detects one from what the client says. Default to the
+  // browser's language when it is one of the four (the app uses the device language), remember
+  // the choice, and open a new session the moment it changes - a hint that only applies to
+  // the next session someone remembers to open is a hint nobody sees.
+  const browserLang = (navigator.language || '').slice(0, 2).toLowerCase();
+  hintEl.value = localStorage.getItem('va_hint') ?? (LOCALES[browserLang] ? browserLang : '');
+  hintEl.addEventListener('change', () => { localStorage.setItem('va_hint', hintEl.value); newSession(); });
+
   const setStatus = (text, isError = false) => { statusEl.textContent = text || ''; statusEl.className = isError ? 'error' : ''; };
-  const setLanguage = (code) => {
+  const setLanguage = (code, { hinted = false } = {}) => {
     language = code;
     voiceLocale = LOCALES[code] || voiceLocale;
-    langEl.textContent = code ? `language: ${code} (${voiceLocale})` : 'language: not yet detected';
+    langEl.textContent = code
+      ? `language: ${code} (${voiceLocale})${hinted ? ', from the hint' : ''}`
+      : `language: not yet detected (microphone in ${voiceLocale})`;
+    micBtn.title = `Listen in ${voiceLocale} (Chrome / Edge)`;
   };
 
   // ---- speech output: the browser speaks each sentence in the locale the service names
@@ -234,12 +246,15 @@
       if (res.status !== 201) { setStatus(await explain(res), true); return; }
       const data = await res.json();
       session = { id: data.session_id, token: data.session_token };
-      setLanguage(data.language);
+      // No hint: listen in the browser's language if it is one of the four, else English,
+      // until the first `language` event - the same rule the app applies with the device locale.
+      voiceLocale = LOCALES[data.language] || LOCALES[browserLang] || LOCALES.en;
+      setLanguage(data.language, { hinted: !!data.language });
       const g = data.greeting;
       const el = addMessage('agent', g.text);
       addMeta(el, { kind: 'question', source: 'none' }, []);
       speak(g.text, g.voice_locale, { isGreeting: true });
-      setStatus(`Session ${session.id} open.`);
+      setStatus(`Session ${session.id} open. Greeting and microphone in ${voiceLocale}; the agent follows whatever language you actually use.`);
     } catch (e) {
       setStatus(`Cannot reach ${base()} — is the service running, and is this page's origin in CORS_ORIGINS? (${e.message})`, true);
     }
