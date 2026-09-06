@@ -37,12 +37,13 @@ watched, not deployed.
   "wiki_chunks": 27,
   "wiki_indexed_at": "2026-09-06T09:12:03Z",
   "languages": ["ar", "de", "en", "fr"],
-  "web_search": "configured"
+  "web_search": "perplexity"
 }
 ```
 
-`web_search` is `"configured"` or `"unconfigured"`. When unconfigured, the fallback path
-produces `source: "none"` turns rather than failing.
+`web_search` names the fallback: `"perplexity"` (Perplexity Sonar through OpenRouter, the
+default), `"brave"` (Brave Search, when a key is set), or `"unconfigured"`. When
+unconfigured, the fallback path produces `source: "none"` turns rather than failing.
 
 ### `GET /api/version`
 

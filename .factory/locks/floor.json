@@ -4,12 +4,12 @@
   "_slack_is_zero_here_on_purpose": "These are set EQUAL to what the harness currently observes, not below it. The gap between observed and floor is exactly the number of assertions that can be deleted with the gate still green, and it GROWS as the harness improves, because raising the floor is a protected edit the factory cannot make. Zero slack forces the raise into the same human commit that accepts the new assertions, which is mildly annoying every time and is the entire reason the number means something.",
 
   "static_checks": 6,
-  "unit_tests": 69,
+  "unit_tests": 73,
   "e2e_steps": 12,
   "holdout_assertions": 32,
   "mutations_total": 8,
 
-  "_measured_2026_09_06": "python harness/ci.py -> STATIC_OK (static.py: checks=6, ruff-lint, ruff-format, mypy, ios-manifests, ruff-lint-tools, ruff-format-tools), UNIT_PASSED tests=69 (60 service + 9 wiki import tool), APP_STARTED, E2E_PASSED steps=12, HOLDOUT_PASSED scenarios=5 assertions=32, MUTATIONS_TOTAL=8 MUTATIONS_CAUGHT=8 MUTATIONS_NOT_INJECTED=0 MUTATIONS_ABOVE_LINE=7, GATE_OK mode=full. Raised from 4/52 on 2026-09-04 when the live wiki (four service tests), smarter lexical retrieval (three) and tools/wiki (nine tests, two lint checks) joined the gate. Product replaced 2026-09-03; every number above was re-measured against the Virtual Agent, and the DynaChat-era numbers (549 unit, 9 holdout, 4 mutations) are in git history.",
+  "_measured_2026_09_06": "python harness/ci.py -> STATIC_OK (static.py: checks=6, ruff-lint, ruff-format, mypy, ios-manifests, ruff-lint-tools, ruff-format-tools), UNIT_PASSED tests=73 (64 service + 9 wiki import tool), APP_STARTED, E2E_PASSED steps=12, HOLDOUT_PASSED scenarios=5 assertions=32, MUTATIONS_TOTAL=8 MUTATIONS_CAUGHT=8 MUTATIONS_NOT_INJECTED=0 MUTATIONS_ABOVE_LINE=7, GATE_OK mode=full. Raised from 4/52 on 2026-09-04 when the live wiki (four service tests), smarter lexical retrieval (three) and tools/wiki (nine tests, two lint checks) joined the gate. Product replaced 2026-09-03; every number above was re-measured against the Virtual Agent, and the DynaChat-era numbers (549 unit, 9 holdout, 4 mutations) are in git history.",
 
   "_where_each_count_comes_from": "unit_tests, e2e_steps, holdout_assertions and mutations_total are the markers ci.py prints. static_checks is the count harness/static.py leaves in harness/.run/static-checks, because ci.py swallows a passing rung's output; a static rung that silently became three tools would drop that file's number and fail here.",
 

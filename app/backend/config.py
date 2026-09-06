@@ -48,11 +48,25 @@ WIKI_MIN_TERM_COVERAGE: float = 0.4
 WIKI_MIN_SIMILARITY: float = 0.45
 
 # --- web fallback -------------------------------------------------------------------------
+# Two ways to reach the web, both ending in named pages the agent composes from:
+#   perplexity  Perplexity Sonar through OpenRouter (the one provider, the one key). It
+#               searches, answers, and returns the pages it used. The default.
+#   brave       Brave Search: links and snippets, needs its own key. Used when one is set,
+#               and by the harness, whose stubs are Brave-shaped.
+#   none        no web fallback; the agent says it does not know when the wiki has nothing.
 BRAVE_SEARCH_API_KEY: str = os.environ.get("BRAVE_SEARCH_API_KEY", "")
 WEB_SEARCH_BASE_URL: str = os.environ.get(
     "WEB_SEARCH_BASE_URL", "https://api.search.brave.com/res/v1"
 )
 WEB_SEARCH_RESULTS: int = 5
+WEB_SEARCH_MODEL: str = "perplexity/sonar"
+WEB_SEARCH_PROVIDER: str = os.environ.get("WEB_SEARCH_PROVIDER") or (
+    "brave" if BRAVE_SEARCH_API_KEY else "perplexity"
+)
+if WEB_SEARCH_PROVIDER not in {"perplexity", "brave", "none"}:
+    raise RuntimeError(
+        f"WEB_SEARCH_PROVIDER={WEB_SEARCH_PROVIDER!r}: expected perplexity, brave or none"
+    )
 
 # --- sessions -----------------------------------------------------------------------------
 SESSION_TTL_HOURS: int = 24
