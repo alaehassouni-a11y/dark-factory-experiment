@@ -19,7 +19,7 @@ the holdout can compose the real pipeline with fakes at exactly the seam product
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterable
 from typing import Protocol
 
 from backend.agent.events import (
@@ -104,7 +104,7 @@ class Agent:
             context = "\n\n".join(
                 f"[{h.chunk.title} - {h.chunk.location}]\n{h.chunk.text}" for h in hits
             )
-            sources = [
+            sources = _unique(
                 Source(
                     kind="wiki",
                     title=h.chunk.title,
@@ -112,7 +112,7 @@ class Agent:
                     snippet=_snippet(h.chunk.text),
                 )
                 for h in hits
-            ]
+            )
             try:
                 async for ev in self._compose(session, language, "wiki", context, sources):
                     yield ev
@@ -125,10 +125,10 @@ class Agent:
             results = await self.search.search(text, language)
             if results:
                 context = "\n\n".join(f"[{r.title} - {r.url}]\n{r.snippet}" for r in results)
-                sources = [
+                sources = _unique(
                     Source(kind="web", title=r.title, url=r.url, snippet=_snippet(r.snippet))
                     for r in results
-                ]
+                )
                 try:
                     async for ev in self._compose(session, language, "web", context, sources):
                         yield ev
@@ -229,6 +229,20 @@ class Agent:
             Turn(role="agent", text=text, language=language, kind=kind, source=source)
         )
         yield TurnEvent(kind=kind, source=source, language=language, text=text)
+
+
+def _unique(sources: Iterable[Source]) -> list[Source]:
+    """One entry per document or page, in rank order, with the best-ranked snippet. The
+    model sees every excerpt; the client hears each source named once."""
+    seen: set[str] = set()
+    out: list[Source] = []
+    for s in sources:
+        key = s.location or s.url or s.title
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(s)
+    return out
 
 
 def _snippet(text: str, limit: int = 200) -> str:

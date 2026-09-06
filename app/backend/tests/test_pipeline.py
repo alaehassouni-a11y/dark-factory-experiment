@@ -129,3 +129,29 @@ async def test_the_model_sees_history_and_the_language_instruction(
     assert messages[0]["role"] == "system" and "Reply ONLY in French" in messages[0]["content"]
     assert [m["role"] for m in messages[1:]] == ["user", "assistant", "user"]
     assert messages[1]["content"] == "What are the shop opening hours?"
+
+
+async def test_a_document_matched_by_several_passages_is_named_once(tmp_path) -> None:
+    """The model sees every excerpt; the client hears each source once. A long document
+    with several matching sections used to be listed once per section."""
+    from pathlib import Path
+
+    from backend.sessions.store import Session
+
+    root = Path(tmp_path)
+    (root / "watering.md").write_text(
+        "# Watering a bonsai\n\n## When\n\nWater the bonsai when the soil is dry.\n\n"
+        "## How\n\nWater the bonsai thoroughly.\n\n## Why\n\nA bonsai in a small pot dries fast.\n",
+        encoding="utf-8",
+    )
+    llm = FakeLLM("Water it when the soil is dry.")
+    index = await WikiIndex.build(root, llm)
+    agent = Agent(wiki=index, llm=llm, search=SpySearch())
+    events = [
+        e async for e in agent.respond(Session.new(client_id="c"), "How do I water a bonsai?")
+    ]
+    sources = next(e for e in events if isinstance(e, SourcesEvent)).sources
+    assert [s.location for s in sources] == ["watering.md"]
+    assert len(llm.calls[0][0]["content"].split("[Watering a bonsai - watering.md]")) > 2, (
+        "the model still receives every matching passage"
+    )
