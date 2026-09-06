@@ -75,7 +75,7 @@ the whole journey - and it is a smaller claim than "a client heard the answer".
 python harness/ci.py
   HARNESS_START mode=full driver=http
   STATIC_OK
-  UNIT_PASSED tests=73
+  UNIT_PASSED tests=75
   APP_STARTED port=61766
   E2E_PASSED steps=12
   HOLDOUT_PASSED scenarios=5 assertions=32
@@ -86,7 +86,7 @@ python harness/ci.py
   GATE_OK mode=full
 ```
 
-Measured 2026-09-06 (73 = 64 service tests + 9 for the wiki import tool). Real, reproducible, and it needs no secrets: the stubs are an
+Measured 2026-09-06 (75 = 66 service tests + 9 for the wiki import tool). Real, reproducible, and it needs no secrets: the stubs are an
 OpenAI-shaped model and a Brave-shaped search, so **the gate proves the pipeline, not
 the providers.** What the real model says to a real client is the mocked-boundary
 policy in `CLAUDE.md`, and a person checks it on the host after a merge.

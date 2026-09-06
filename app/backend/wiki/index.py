@@ -24,7 +24,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from backend.config import WIKI_MIN_SIMILARITY, WIKI_MIN_TERM_COVERAGE, WIKI_TOP_K
+from backend.config import (
+    WIKI_MAX_CHUNKS_PER_DOCUMENT,
+    WIKI_MIN_SIMILARITY,
+    WIKI_MIN_TERM_COVERAGE,
+    WIKI_MIN_TERM_MATCHES,
+    WIKI_TOP_K,
+)
 from backend.languages import _ARABIC, _FUNCTION_WORDS, tokenize
 
 logger = logging.getLogger(__name__)
@@ -55,6 +61,12 @@ _STOPWORDS: frozenset[str] = frozenset().union(*_FUNCTION_WORDS.values()) | _QUE
 _ARABIC_PREFIXES = ("وال", "بال", "لل", "ال", "و", "ب", "ل", "ف")
 _ARABIC_SUFFIXES = ("ات", "ون", "ين", "ية", "ها", "هم", "ة", "ه")
 _MIN_CONTENT_LETTERS = 3
+# A passage joins the lexical ranking only above this BM25 score. A word that appears in
+# every passage ("bonsai", in a bonsai wiki) scores about 0.01 everywhere, and ranking 54
+# near-zero scores puts the passages in an order that means nothing, which the fusion then
+# weighed as much as the embeddings. A term in half the passages scores about 0.7; a rare
+# one 3 or more. Below the bar the passage is ranked by meaning alone.
+_MIN_LEXICAL_SCORE = 0.5
 
 
 def stem(token: str) -> str:
@@ -101,8 +113,10 @@ class Chunk:
 class Hit:
     chunk: Chunk
     score: float
-    lexical_coverage: float
+    lexical_coverage: float  # matched content stems / content stems in the question
     cosine: float
+    matched: int = 0  # how many of the question's content stems the passage contains
+    content: int = 0  # how many content stems the question has
 
 
 def _wiki_files(root: Path) -> list[Path]:
@@ -269,25 +283,39 @@ class WikiIndex:
             qv = (await self._embedder.embed([query]))[0]
             cosines = [_cosine(qv, v) for v in self.vectors]
 
-        def ranks(scores: list[float]) -> dict[int, int]:
+        def ranks(scores: list[float], floor: float = 0.0) -> dict[int, int]:
             order = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)
-            return {i: r for r, i in enumerate(order) if scores[i] > 0}
+            return {i: r for r, i in enumerate(order) if scores[i] > floor}
 
         fused: dict[int, float] = {}
-        for rank_map in (ranks(lexical), ranks(cosines)):
+        for rank_map in (ranks(lexical, _MIN_LEXICAL_SCORE), ranks(cosines)):
             for i, r in rank_map.items():
                 fused[i] = fused.get(i, 0.0) + 1.0 / (60 + r)
-        best = sorted(fused, key=lambda i: fused[i], reverse=True)[:top_k]
+        # Best first, but no document may fill the excerpts on its own: a client's question
+        # in French ranks every passage of a French document above the English passage
+        # that actually answers it, and the model can only decline what it never saw.
+        best: list[int] = []
+        per_document: Counter[str] = Counter()
+        for i in sorted(fused, key=lambda i: fused[i], reverse=True):
+            location = self.chunks[i].location
+            if per_document[location] >= WIKI_MAX_CHUNKS_PER_DOCUMENT:
+                continue
+            per_document[location] += 1
+            best.append(i)
+            if len(best) >= top_k:
+                break
         hits = []
         for i in best:
             present = set(self._tokens[i])
-            coverage = sum(1 for t in content if t in present) / len(content)
+            matched = sum(1 for t in content if t in present)
             hits.append(
                 Hit(
                     chunk=self.chunks[i],
                     score=fused[i],
-                    lexical_coverage=round(coverage, 3),
+                    lexical_coverage=round(matched / len(content), 3),
                     cosine=round(cosines[i], 3),
+                    matched=matched,
+                    content=len(content),
                 )
             )
         return hits
@@ -300,4 +328,7 @@ class WikiIndex:
         if not hits:
             return False
         top = hits[0]
-        return top.lexical_coverage >= WIKI_MIN_TERM_COVERAGE or top.cosine >= WIKI_MIN_SIMILARITY
+        by_words = top.lexical_coverage >= WIKI_MIN_TERM_COVERAGE and top.matched >= min(
+            WIKI_MIN_TERM_MATCHES, top.content
+        )
+        return by_words or top.cosine >= WIKI_MIN_SIMILARITY
