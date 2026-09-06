@@ -21,7 +21,7 @@ Two codebases, one contract: a Python 3.11 FastAPI service under `app/backend/` 
 - `uv` for package management (not pip, not poetry) - `pyproject.toml` is the dependency source of truth, `uv.lock` pins exact versions and is committed
 - FastAPI with `uvicorn[standard]`
 - `openai` SDK pointed at OpenRouter's OpenAI-compatible endpoint, for both chat completions and embeddings
-- `httpx` for the one other outbound call (Brave Search)
+- `httpx` for the one other outbound call (Brave Search, the alternative web fallback; the default fallback is Perplexity Sonar through the same OpenRouter client)
 - `python-dotenv` for the optional local `.env`
 - Dev tools, pinned in `[project.optional-dependencies].dev`: `ruff`, `mypy`, `pytest`, `pytest-asyncio`, `respx`, `pyyaml`
 
@@ -63,7 +63,7 @@ dark-factory-experiment/
 │   │   │   ├── prompts.py   # The system prompt and the two protocol markers
 │   │   │   └── sentences.py # Incremental sentence splitter (what makes the agent live)
 │   │   ├── wiki/index.py    # Read, chunk, index (BM25 + cosine, RRF), the confidence decision
-│   │   ├── search/web.py    # Brave Search client; unavailable is a state, not an error
+│   │   ├── search/web.py    # The web fallback: Perplexity Sonar via OpenRouter (default) or Brave; unavailable is a state, not an error
 │   │   ├── sessions/store.py# In-process sessions and transcripts, 24h TTL
 │   │   ├── llm/openrouter.py# The only inference client
 │   │   ├── routes/sessions.py # POST /api/sessions, GET/DELETE /api/sessions/{id}, POST .../turns (SSE). The only file that knows the wire format
@@ -203,7 +203,7 @@ These are the code-level shape of the MISSION.md hard invariants and the PRD's o
 3. **Every turn declares a source** from `{"wiki", "web", "none"}` and a kind from `{"answer", "question", "no_answer"}`. The model is never asked to answer from nothing.
 4. **Every `/api/sessions/{session_id}/...` route depends on `get_current_session`.** 401 without a token, 404 unknown session, 403 wrong token, in that order.
 5. **The cap is `DAILY_TURN_CAP = 100` over `WINDOW_HOURS = 24` in `rate_limit.py`** and is defined nowhere else. 429 carries `resets_at`.
-6. **OpenRouter is the only inference provider.** `anthropic/claude-sonnet-4.6` for chat (overridable by `CHAT_MODEL` for canaries only), `openai/text-embedding-3-small` for embeddings. No other provider, no local model.
+6. **OpenRouter is the only inference provider.** `anthropic/claude-sonnet-4.6` for chat (overridable by `CHAT_MODEL` for canaries only), `openai/text-embedding-3-small` for embeddings, `perplexity/sonar` for the web fallback's research step. No other provider, no local model.
 7. **The stream is live.** `sentence` events fire as each sentence completes, before the turn closes; the first sentence never waits for the last token. The SSE framing in `docs/API.md` is exact: tokens are unnamed `data:` frames carrying a JSON string, `language` comes first, `sources` and `turn` come before `data: [DONE]`. The app's parser depends on it.
 
 ---
@@ -217,7 +217,8 @@ All env var reads happen in `app/backend/config.py`.
 | `OPENROUTER_API_KEY` | **yes** | Chat completions and embeddings. The service refuses to start without it |
 | `OPENROUTER_BASE_URL` | no | Default `https://openrouter.ai/api/v1`. The harness points it at the stub |
 | `CHAT_MODEL` | no | Default `anthropic/claude-sonnet-4.6`. For canarying a model on the inactive colour only |
-| `BRAVE_SEARCH_API_KEY` | no | The web fallback. Unset: the agent says it does not know when the wiki has nothing; `/api/health` reports `web_search: unconfigured` |
+| `WEB_SEARCH_PROVIDER` | no | `perplexity` (default: Sonar through OpenRouter, no second key), `brave` (default when a Brave key is set), or `none` |
+| `BRAVE_SEARCH_API_KEY` | no | Brave Search, the alternative web fallback. Setting it selects `brave`. The harness's stubs are Brave-shaped |
 | `WEB_SEARCH_BASE_URL` | no | Default `https://api.search.brave.com/res/v1`. The harness points it at the stub |
 | `WIKI_RESOURCES_DIR` | no | Default `<repo>/virtualagent/resources`. The image pins `/app/virtualagent/resources` and compose mounts the host's wiki folder there; the harness points it at its fixture wiki |
 | `WIKI_POLL_SECONDS` | no | Default `10`. How often the wiki folder is checked for changes; `0` reads it once at startup |

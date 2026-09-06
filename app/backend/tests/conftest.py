@@ -56,6 +56,8 @@ class FakeLLM:
 
 
 class SpySearch:
+    name = "brave"
+
     def __init__(self, available: bool = True, results: list[WebResult] | None = None) -> None:
         self.available = available
         self.results = (

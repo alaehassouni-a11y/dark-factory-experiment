@@ -149,7 +149,7 @@ compressed to what the factory has to obey.
 - **Service:** one Python 3.11 FastAPI process under `app/backend/`, managed with `uv`. No database: sessions and the daily turn counter live in process.
 - **Wiki:** every `.md` and `.txt` file in the wiki folder, `virtualagent/resources/` by default, chunked and indexed at startup and re-indexed within seconds whenever a file is added, changed or removed (BM25 over words plus cosine over embeddings, fused with reciprocal rank fusion). Adding a file to the folder is the only way the wiki grows; `tools/wiki/ingest.py` turns Word, PDF, HTML and spreadsheets into files for it.
 - **Inference:** OpenRouter only - `anthropic/claude-sonnet-4.6` for answers, `openai/text-embedding-3-small` for the index.
-- **Web fallback:** Brave Search, in the client's language, only when the wiki has no confident answer.
+- **Web fallback:** only when the wiki has no confident answer. Perplexity Sonar through OpenRouter by default: it searches, answers, and names the pages it used, which become the turn's sources. Brave Search is the alternative when a Brave key is set.
 - **API:** documented in [`docs/API.md`](docs/API.md). Every agent turn streams as Server-Sent Events: the detected language first, then tokens, a `sentence` event each time one completes (the app speaks it immediately), the sources, and a closing `turn` that declares `wiki`, `web` or `none`.
 
 ### What cannot change
@@ -164,7 +164,7 @@ compressed to what the factory has to obey.
 
 - Python 3.11+ and [uv](https://docs.astral.sh/uv/)
 - An [OpenRouter](https://openrouter.ai) API key
-- Optional: a [Brave Search](https://brave.com/search/api/) API key for the web fallback
+- Optional: a [Brave Search](https://brave.com/search/api/) API key, if you prefer Brave to Perplexity for the web fallback
 - For the app: a Mac with Xcode 15+ and [XcodeGen](https://github.com/yonaskolb/XcodeGen)
 
 ### Run the service

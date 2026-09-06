@@ -48,7 +48,10 @@ async def test_paraphrased_question_still_matches_the_document(tmp_path: Path) -
         "Quelle est la durée de la garantie ?",
         "Est-ce que le produit est garanti ?",
         "Y a-t-il une garantie ?",
-        "A quelle heure ouvrez-vous ?",
+        # Two matching stems (heures -> heure, ouverture -> ouvert). "A quelle heure
+        # ouvrez-vous ?" shares one word only, the shape "capital of Japan" has too, and
+        # telling those apart is the embedding model's job, not the word count's.
+        "Quelles sont vos heures d'ouverture ?",
     ):
         hits = await index.search(question)
         assert hits and index.is_confident(hits), question
@@ -58,6 +61,37 @@ async def test_paraphrased_question_still_matches_the_document(tmp_path: Path) -
     assert (await index.search("A quelle heure ouvrez-vous ?"))[0].chunk.location == "horaires.md"
     unrelated = await index.search("Qui a peint la Joconde ?")
     assert not index.is_confident(unrelated)
+
+
+async def test_one_document_cannot_crowd_out_the_one_that_answers(tmp_path: Path) -> None:
+    """Six matching passages of a French guide, one English passage with the answer: the
+    model must see the English one too."""
+    sections = "\n\n".join(
+        f"## Partie {i}\n\nLe bonsai a besoin de soins. Le bonsai est un arbre en pot."
+        for i in range(6)
+    )
+    (tmp_path / "guide.md").write_text(f"# Entretien du bonsai\n\n{sections}\n", encoding="utf-8")
+    (tmp_path / "repotting.md").write_text(
+        "# Repotting\n\nMost bonsai need repotting about every two years.\n", encoding="utf-8"
+    )
+    index = await WikiIndex.build(tmp_path, FakeLLM())
+    hits = await index.search("Quand faut-il rempoter le bonsai ?")
+    locations = [h.chunk.location for h in hits]
+    assert locations.count("guide.md") <= 2
+    assert "repotting.md" in locations
+
+
+async def test_one_shared_word_is_not_coverage(tmp_path: Path) -> None:
+    (tmp_path / "soil.md").write_text(
+        "# Bonsai soil\n\nAkadama comes from Japan and holds water well.\n", encoding="utf-8"
+    )
+    index = await WikiIndex.build(tmp_path, FakeLLM())
+    hits = await index.search("What is the capital of Japan?")
+    assert hits[0].matched == 1 and hits[0].content == 2
+    assert not index.is_confident(hits), "'Japan' alone does not make it a soil question"
+    hits = await index.search("Akadama?")
+    assert hits[0].matched == 1 and hits[0].content == 1
+    assert index.is_confident(hits), "a one-word question fully covered is covered"
 
 
 def test_stems_merge_inflections_in_the_four_languages() -> None:

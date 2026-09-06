@@ -45,14 +45,40 @@ WIKI_POLL_SECONDS: int = int(os.environ.get("WIKI_POLL_SECONDS", "10"))
 # rather than 0.5 because the bar is not the last line of defence: excerpts that pass it
 # without answering are declined by the model and the turn falls through to the web.
 WIKI_MIN_TERM_COVERAGE: float = 0.4
-WIKI_MIN_SIMILARITY: float = 0.45
+# A coverage pass also needs at least this many matching content words (or all of them,
+# when the question has fewer): one shared word, "Japan" in a question about capitals
+# against a wiki that mentions akadama from Japan, is not coverage.
+WIKI_MIN_TERM_MATCHES: int = 2
+# Measured 2026-09-06 with text-embedding-3-small against the nine-document wiki:
+# covered questions score 0.53-0.75 in the document's own or a sibling Latin-script
+# language and 0.36-0.38 from Arabic; every unrelated question scored 0.22 or less.
+# 0.30 sits between with margin on both sides, and the model's decline is the net.
+WIKI_MIN_SIMILARITY: float = 0.30
+# Passages from one document that may occupy the excerpts. Five passages of the same
+# document, all in the client's language, once crowded out the one passage of another
+# document that held the answer.
+WIKI_MAX_CHUNKS_PER_DOCUMENT: int = 2
 
 # --- web fallback -------------------------------------------------------------------------
+# Two ways to reach the web, both ending in named pages the agent composes from:
+#   perplexity  Perplexity Sonar through OpenRouter (the one provider, the one key). It
+#               searches, answers, and returns the pages it used. The default.
+#   brave       Brave Search: links and snippets, needs its own key. Used when one is set,
+#               and by the harness, whose stubs are Brave-shaped.
+#   none        no web fallback; the agent says it does not know when the wiki has nothing.
 BRAVE_SEARCH_API_KEY: str = os.environ.get("BRAVE_SEARCH_API_KEY", "")
 WEB_SEARCH_BASE_URL: str = os.environ.get(
     "WEB_SEARCH_BASE_URL", "https://api.search.brave.com/res/v1"
 )
 WEB_SEARCH_RESULTS: int = 5
+WEB_SEARCH_MODEL: str = "perplexity/sonar"
+WEB_SEARCH_PROVIDER: str = os.environ.get("WEB_SEARCH_PROVIDER") or (
+    "brave" if BRAVE_SEARCH_API_KEY else "perplexity"
+)
+if WEB_SEARCH_PROVIDER not in {"perplexity", "brave", "none"}:
+    raise RuntimeError(
+        f"WEB_SEARCH_PROVIDER={WEB_SEARCH_PROVIDER!r}: expected perplexity, brave or none"
+    )
 
 # --- sessions -----------------------------------------------------------------------------
 SESSION_TTL_HOURS: int = 24
