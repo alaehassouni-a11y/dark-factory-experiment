@@ -176,3 +176,25 @@ The PRD and MISSION.md changed in the same commit. What did not change: adding a
 the folder is still the only authoring path, there is still no upload surface, and the
 agent still names the document it answered from. What was given up: a wiki change is no
 longer a commit anyone reviews, unless the folder is also kept in git by habit.
+
+---
+
+## D-009 · The web fallback is Perplexity Sonar through OpenRouter
+
+**Status:** decided by the owner · **Raised:** 2026-09-06 · **Kind:** product
+
+The requirement says "if the answer is not found, will default to results from the web".
+The first implementation reached the web through Brave Search, which needs its own key;
+without one the agent said it did not know. The owner asked why the model itself could not
+answer, and then why not Perplexity. The first is refused by the PRD (an answer nobody can
+point at); the second fits: Sonar is on OpenRouter, the one provider MISSION invariant 6
+allows, it searches and answers and returns the pages it used, and OpenRouter passes those
+pages through as `url_citation` annotations (verified with a real call, 2026-09-06).
+
+**Decided:** `WEB_SEARCH_PROVIDER` defaults to `perplexity`; a Brave key selects `brave`;
+`none` turns the fallback off. Sonar's pages are the turn's sources and its answer is the
+excerpt Claude composes the spoken reply from, so the order (wiki, then web, then none) and
+the closed source set are untouched. No cited page means no web source and no result. The
+harness keeps its Brave-shaped stubs, so the gate is unchanged. Cost: about half a cent per
+web turn, search included. Latency: Sonar answers before Claude speaks, a few seconds more
+than a wiki turn.

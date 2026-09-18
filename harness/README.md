@@ -10,7 +10,7 @@ Measured 2026-09-06 on `product/virtual-agent`:
 ```
 HARNESS_START mode=full driver=http
 STATIC_OK
-UNIT_PASSED tests=69
+UNIT_PASSED tests=75
 APP_STARTED port=61766
 E2E_PASSED steps=12
 HOLDOUT_PASSED scenarios=5 assertions=32

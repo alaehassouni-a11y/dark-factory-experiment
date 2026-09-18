@@ -50,7 +50,8 @@ The containers read these from `/opt/virtualagent/.env` via docker-compose. The 
 | `VIRTUALAGENT_HOST` | **yes** | The public hostname Caddy serves and provisions a certificate for. Read by the Caddy container, not the app |
 | `LETSENCRYPT_EMAIL` | **yes** | The contact Let's Encrypt notifies about the certificate. Read by the Caddy container |
 | `OPENROUTER_API_KEY` | **yes** | OpenRouter chat completions and the embeddings that index the wiki. The service refuses to start without it |
-| `BRAVE_SEARCH_API_KEY` | optional | Brave Search key for the web fallback. When unset the agent answers from the wiki only and says it does not know otherwise |
+| `WEB_SEARCH_PROVIDER` | optional | `perplexity` (default: Sonar through OpenRouter, no second key), `brave`, or `none` |
+| `BRAVE_SEARCH_API_KEY` | optional | Brave Search key; setting it selects Brave as the web fallback |
 | `CHAT_MODEL` | optional | OpenRouter chat model. Defaults to `anthropic/claude-sonnet-4.6`; set it to canary a new model on the inactive colour |
 | `CORS_ORIGINS` | optional | Comma-separated browser origins allowed to call the API. The iOS app needs none; leave empty |
 

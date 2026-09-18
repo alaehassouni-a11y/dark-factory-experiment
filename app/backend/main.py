@@ -17,13 +17,14 @@ from backend.config import (
     BRAVE_SEARCH_API_KEY,
     CORS_ORIGINS,
     WEB_SEARCH_BASE_URL,
+    WEB_SEARCH_PROVIDER,
     WIKI_POLL_SECONDS,
     WIKI_RESOURCES_DIR,
 )
 from backend.languages import SUPPORTED_LANGUAGES, supported_languages_payload
 from backend.llm.openrouter import OpenRouterClient
 from backend.routes import sessions
-from backend.search.web import BraveSearch
+from backend.search.web import BraveSearch, PerplexitySearch
 from backend.wiki.index import Embedder, WikiIndex, folder_signature
 
 logging.basicConfig(level=logging.INFO)
@@ -73,7 +74,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Indexing the wiki at %s", WIKI_RESOURCES_DIR)
     wiki = await WikiIndex.build(WIKI_RESOURCES_DIR, llm)
     logger.info("Wiki indexed: %d documents, %d chunks", wiki.document_count, wiki.chunk_count)
-    search = BraveSearch(api_key=BRAVE_SEARCH_API_KEY, base_url=WEB_SEARCH_BASE_URL)
+    # The web fallback. Perplexity Sonar through OpenRouter by default (no second key);
+    # Brave when a key is set or asked for; none when asked for. See config.py.
+    search: BraveSearch | PerplexitySearch
+    if WEB_SEARCH_PROVIDER == "perplexity":
+        search = PerplexitySearch(llm)
+    elif WEB_SEARCH_PROVIDER == "brave":
+        search = BraveSearch(api_key=BRAVE_SEARCH_API_KEY, base_url=WEB_SEARCH_BASE_URL)
+    else:
+        search = BraveSearch(api_key="", base_url=WEB_SEARCH_BASE_URL)  # unavailable, on purpose
+    logger.info("Web fallback: %s", search.name if search.available else "none")
     app.state.wiki = wiki
     app.state.wiki_root = WIKI_RESOURCES_DIR
     app.state.search = search
@@ -113,7 +123,9 @@ async def health() -> dict[str, object]:
         "wiki_chunks": wiki.chunk_count if wiki else 0,
         "wiki_indexed_at": (wiki.built_at.isoformat().replace("+00:00", "Z") if wiki else None),
         "languages": sorted(SUPPORTED_LANGUAGES),
-        "web_search": "configured" if search and search.available else "unconfigured",
+        "web_search": (
+            getattr(search, "name", "configured") if search and search.available else "unconfigured"
+        ),
     }
 
 

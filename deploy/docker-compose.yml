@@ -43,8 +43,9 @@ services:
       # Required. OpenRouter is the only inference provider (chat + the
       # embeddings that index the wiki). The service refuses to start without it.
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in the .env file - the service refuses to start without it}
-      # Optional. Brave Search key for the web fallback. Unset means the agent
-      # says it does not know when the wiki has no confident answer.
+      # The web fallback: Perplexity Sonar through OpenRouter by default (no
+      # second key), Brave when a key is set, none when asked for.
+      WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-}
       BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY:-}
       # The wiki copied into the image by deploy/Dockerfile. Fixed, not read
       # from .env — a host-side path here would let the image and the wiki
@@ -83,6 +84,7 @@ services:
     restart: unless-stopped
     environment:
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?set OPENROUTER_API_KEY in the .env file - the service refuses to start without it}
+      WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-}
       BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY:-}
       WIKI_RESOURCES_DIR: /app/virtualagent/resources
       CORS_ORIGINS: ${CORS_ORIGINS:-}

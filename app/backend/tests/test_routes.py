@@ -25,7 +25,7 @@ async def test_health_version_and_languages_are_public(client: httpx.AsyncClient
     assert health["status"] == "ok"
     assert health["wiki_documents"] == 3 and health["wiki_chunks"] >= 3
     assert health["languages"] == ["ar", "de", "en", "fr"]
-    assert health["web_search"] == "configured"
+    assert health["web_search"] == "brave"
     assert (await client.get("/api/version")).status_code == 200
     codes = [entry["code"] for entry in (await client.get("/api/languages")).json()]
     assert codes == ["ar", "de", "en", "fr"]
