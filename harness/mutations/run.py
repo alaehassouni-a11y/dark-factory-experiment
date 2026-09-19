@@ -14,31 +14,37 @@ TWO DELIBERATE DEVIATIONS FROM THE SKILL'S TEMPLATE, both forced by this repo.
 
 **1. It mutates IN PLACE and restores with git, instead of copying the tree.**
 The template copies `["app", "tests", "harness", ".factory"]` into a temp dir per defect.
-Here `app/` contains `app/backend/.venv` and `app/frontend/node_modules` - gigabytes, and
-several minutes per defect. Excluding them instead breaks the copy, because the checks
-need that venv to run at all.
+Here `app/` contains `app/backend/.venv` - hundreds of megabytes, and the better part of
+a minute per defect. Excluding it instead breaks the copy, because ruff, mypy and pytest
+all run out of that venv.
 
 So: apply the mutation to the real file, run the checks, and restore with
 `git checkout --`. Every file a defect touches must be CLEAN before this starts, which
 is asserted below (the rest of the tree may be dirty: validate-pr overlays `.archon/`
-onto the PR worktree), and every path restores in a `finally`. If this process is killed mid-defect, `git status`
-shows exactly one modified file and `git checkout -- <file>` is the fix.
+onto the PR worktree), and every path restores in a `finally`.
+
+A `finally` does not survive being killed. When the outer cap in `harness/ci.py`
+(`mutations_timeout_s`) expires, this process is terminated where it stands, and ci.py -
+which is still alive - checks the defect targets out again and prints `MUTATIONS_RESTORED`
+or `MUTATIONS_DIRTY <file>`. Run by hand and killed by hand, `git status` shows exactly
+one modified file and `git checkout -- <file>` is the fix.
 
 **2. It runs `ci.py --quick` PLUS the holdout, not the full `ci.py`.**
-The full gate starts the backend, which requires a validation env that holds secrets and
-lives outside the repo. On any machine without it the app refuses to start and the gate
-exits non-zero - which would mark every single defect CAUGHT, for a reason that has
-nothing to do with the defect. A mutation suite that passes because the app cannot boot
-is worse than no mutation suite, so the E2E rung is excluded rather than faked.
+Not because the full gate cannot run: it can, here, with no secrets and no network -
+`harness/serve.py` starts stub providers and `e2e.py` has been rung 3 of `ci.py` since
+2026-09-04. It is boot cost. The full gate starts a uvicorn process and indexes the wiki
+per run, and eight defects times that, twice (the quick gate and the holdout each already
+cost seconds, not minutes), turns a ~90 s rung into a many-minute one on every PR.
 
-The consequence is stated rather than hidden: **these four defects are caught by static,
-unit and holdout only.** A defect that only the browser journey could catch would escape
-here and this file would not know. That is a real hole and it is the same hole
-`harness/README.md` names - section 4 lives in the workflow, not in this harness yet.
+The consequence is stated rather than hidden: **these eight defects are caught by static,
+unit and holdout only.** A defect that only the API journey could catch would escape here
+and this file would not know. Set `FACTORY_MUTATION_FULL=1` to spend the boot cost and
+close that hole for one run.
 
 Emits `MUTATIONS_TOTAL=N` and `MUTATIONS_CAUGHT=N`; the gate requires them equal.
 `MUTATIONS_ABOVE_LINE=N` is how many the holdout caught, whether or not a lower rung
-caught them first. That is the independence number, and it is the one to watch.
+caught them first. That is the independence number, it is the one to watch, and since
+2026-09-19 `harness/ratchet.py` can floor it instead of asking a human to watch by eye.
 """
 from __future__ import annotations
 
@@ -90,12 +96,21 @@ def run_checks() -> tuple[bool, str, bool]:
     utf-8 with replacement on every child: Windows decodes as cp1252 by default, the
     holdout and the service print Arabic, and the reader thread died on byte 0x81 during
     the first full run. A rung attribution read from a half-decoded buffer is a guess.
+
+    THE BUDGETS BELOW ARE SIZED TO WHAT THE RUN COSTS. Eight defects measure ~90 s in
+    total on a warm cache, about 11 s each for both children together. 180 s and 60 s are
+    roughly twenty times that, which covers a cold uv and mypy cache in a fresh worktree.
+    They used to be 900 s each, so eight defects could in principle ask for four hours
+    under an outer cap of fifteen minutes - the cap always won, and killed the runner
+    holding a mutated file.
     """
     env = dict(os.environ, FACTORY_IN_MUTATION="1")
+    full = os.environ.get("FACTORY_MUTATION_FULL") == "1"
+    gate = [sys.executable, "harness/ci.py"] + ([] if full else ["--quick"])
 
-    quick = subprocess.run([sys.executable, "harness/ci.py", "--quick"], cwd=ROOT,
+    quick = subprocess.run(gate, cwd=ROOT,
                            env=env, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", timeout=900)
+                           errors="replace", timeout=600 if full else 180)
     rung = ""
     if quick.returncode != 0:
         rung = "gate"
@@ -105,7 +120,7 @@ def run_checks() -> tuple[bool, str, bool]:
 
     holdout = subprocess.run([sys.executable, ".factory/holdout/run.py"], cwd=ROOT,
                              env=env, capture_output=True, text=True, encoding="utf-8",
-                             errors="replace", timeout=900)
+                             errors="replace", timeout=60)
     holdout_red = holdout.returncode != 0
 
     if rung:

@@ -3,14 +3,28 @@
 
     python harness/stubs.py --port 8765
 
-Two shapes, both minimal and both deterministic:
+Three shapes, all minimal and all deterministic:
 
   * OpenAI-compatible `POST /v1/chat/completions` (streaming) and `POST /v1/embeddings`,
     which is what the service speaks to OpenRouter. The reply depends only on the system
     prompt: which language it demands and whether the excerpts are wiki or web. That is
     enough for the journey to assert that the LANGUAGE the pipeline chose reached the
     model, and that the SOURCE the pipeline chose is the one it declares.
+  * The same `POST /v1/chat/completions` WITHOUT `stream`, which is the research step of
+    the default web fallback (Perplexity Sonar through OpenRouter, `search/web.py`). It
+    answers with a whole message plus the `url_citation` annotations `openrouter.py`
+    parses into pages, and is counted under its own `research` key so the journey can
+    tell the default fallback from the Brave alternative.
   * Brave-shaped `GET /web/search`, returning one result and counting calls.
+
+Two magic phrases in what the client said drive the paths a happy stub cannot reach.
+Both are looked for in the LAST user message, so an old turn in the history cannot
+re-trigger them, and both only affect the composing (streaming) call:
+
+    stubdecline      the model declines the WIKI excerpts ([[NO_ANSWER]]), which is how
+                     the journey proves wiki-declined -> web.
+    stubdeclineall   the model declines wiki AND web excerpts, which is how the journey
+                     proves a genuine `no_answer` turn with source `none`.
 
 `GET /_calls` reports how many times each endpoint was hit, which is how `e2e.py` proves
 the web was NOT searched while the wiki had a confident answer (MISSION invariant 2).
@@ -28,7 +42,7 @@ import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-CALLS = {"chat": 0, "embeddings": 0, "web_search": 0}
+CALLS = {"chat": 0, "embeddings": 0, "web_search": 0, "research": 0}
 _LOCK = threading.Lock()
 
 # Two sentences each, so the journey sees a sentence event before the turn closes.
@@ -51,6 +65,18 @@ REPLIES: dict[str, dict[str, str]] = {
     },
 }
 _LANGUAGE = re.compile(r"Reply ONLY in (French|English|German|Arabic)")
+# The research step asks for its own language ("...from the web in French, in at most...").
+_RESEARCH_LANGUAGE = re.compile(r"from the web in (French|English|German|Arabic)")
+
+NO_ANSWER_MARKER = "[[NO_ANSWER]]"  # agent/prompts.py; the pipeline strips it, never speaks it
+DECLINE_WIKI = "stubdecline"  # decline the wiki excerpts
+DECLINE_ALL = "stubdeclineall"  # decline the wiki excerpts and the web results
+
+# The one page the research step cites, in the shape openrouter.py's `complete` parses.
+RESEARCH_CITATION = {
+    "type": "url_citation",
+    "url_citation": {"url": "https://stub.example.org/result", "title": "Stub page"},
+}
 
 
 def bag(text: str, dims: int = 256) -> list[float]:
@@ -59,6 +85,15 @@ def bag(text: str, dims: int = 256) -> list[float]:
         vec[zlib.crc32(word.encode("utf-8")) % dims] += 1.0
     norm = sum(v * v for v in vec) ** 0.5 or 1.0
     return [v / norm for v in vec]
+
+
+def _last_user(messages: list[dict]) -> str:
+    """What the client said on THIS turn. The history carries older user messages, and a
+    magic phrase from an earlier turn must not re-trigger."""
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return str(message.get("content", ""))
+    return ""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -76,6 +111,30 @@ class Handler(BaseHTTPRequestHandler):
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
         return json.loads(self.rfile.read(length) or b"{}")
+
+    def _research(self, body: dict, system: str) -> None:
+        """A whole (non-streamed) chat completion with cited pages: the research step of
+        the Perplexity web fallback, which is what the service runs by default."""
+        with _LOCK:
+            CALLS["research"] += 1
+        m = _RESEARCH_LANGUAGE.search(system) or _LANGUAGE.search(system)
+        language = m.group(1) if m else "English"
+        self._json(200, {
+            "id": "stub-research",
+            "object": "chat.completion",
+            "created": 0,
+            "model": body.get("model", "stub"),
+            "choices": [{
+                "index": 0,
+                "finish_reason": "stop",
+                "message": {
+                    "role": "assistant",
+                    "content": REPLIES[language]["web"],
+                    "annotations": [dict(RESEARCH_CITATION)],
+                },
+            }],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        })
 
     def do_GET(self) -> None:  # noqa: N802
         url = urlparse(self.path)
@@ -114,14 +173,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         if url.path == "/v1/chat/completions":
             body = self._body()
+            messages = body.get("messages", [])
+            system = next((m.get("content", "") for m in messages
+                           if m.get("role") == "system"), "")
+            if not body.get("stream"):
+                self._research(body, system)
+                return
             with _LOCK:
                 CALLS["chat"] += 1
-            system = next((m.get("content", "") for m in body.get("messages", [])
-                           if m.get("role") == "system"), "")
             m = _LANGUAGE.search(system)
             language = m.group(1) if m else "English"
             kind = "wiki" if "Wiki excerpts" in system else "web"
             reply = REPLIES[language][kind]
+            said = _last_user(messages).lower()
+            if DECLINE_ALL in said or (kind == "wiki" and DECLINE_WIKI in said):
+                reply = NO_ANSWER_MARKER
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")

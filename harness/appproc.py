@@ -143,6 +143,16 @@ class HttpApp:
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode("utf-8", "replace"), dict(e.headers)
 
+    def delete(self, path: str, headers: dict | None = None):
+        """(status, body, headers). A resource that can be created and never deleted is
+        half a contract; the journey asserts the 204 and the 404 after it."""
+        req = urllib.request.Request(self.base + path, headers=headers or {}, method="DELETE")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.status, r.read().decode("utf-8", "replace"), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode("utf-8", "replace"), dict(e.headers)
+
 
 # --------------------------------------------------------------------------- cli
 class CliApp:
