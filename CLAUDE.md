@@ -244,11 +244,12 @@ The factory's lane: inside the repo, inside the PR. `deploy/` is protected (FACT
 ## Known Footguns
 
 1. **Sessions and the turn counter are in process.** Run one uvicorn worker. A restart forgets every session (the PRD lists durability as not-yet); two workers would each count half the turns.
-2. **Language detection is a heuristic.** Arabic by script; the three Latin-script languages by function words. A very short utterance with no function word ("Horaires ?") detects as nothing, and on a fresh session the agent asks for a language. That is the designed behaviour, and improving detection within the four languages is an allowed evolution.
-3. **The sentence splitter splits on `.` followed by whitespace.** "e.g. this" becomes two sentences. "9.30" survives. Known, documented in `sentences.py`.
-4. **The app has never been compiled.** It was written without a Mac. Expect API-availability and concurrency diagnostics on the first build; `app/ios/README.md` says exactly what has not been verified.
-5. **On Windows, `python` may be the Store stub.** The harness scripts call `python`; put a real 3.11 first on PATH or the gate exits before it starts, with a message about the Microsoft Store.
-6. **`harness/mutations/run.py` mutates in place and restores with git.** It refuses a dirty tree. If it is killed mid-defect, `git status` shows one modified file; `git checkout -- <file>` is the fix.
+2. **A deploy is a restart, and there is no promotion step.** A merge to `main` is flipped into production by the deploy timer on the next tick, and the flip starts a new process. Because of footgun 1 that means every deploy drops every live conversation mid-turn and resets every client's daily counter to zero - several times a day if several PRs merge. `.factory/decisions.md` D-010 records that this was chosen rather than overlooked.
+3. **Language detection is a heuristic.** Arabic by script; the three Latin-script languages by function words. A very short utterance with no function word ("Horaires ?") detects as nothing, and on a fresh session the agent asks for a language. That is the designed behaviour, and improving detection within the four languages is an allowed evolution.
+4. **The sentence splitter splits on `.` followed by whitespace.** "e.g. this" becomes two sentences. "9.30" survives. Known, documented in `sentences.py`.
+5. **The app has never been compiled.** It was written without a Mac. Expect API-availability and concurrency diagnostics on the first build; `app/ios/README.md` says exactly what has not been verified.
+6. **On Windows, `python` may be the Store stub.** The harness scripts call `python`; put a real 3.11 first on PATH or the gate exits before it starts, with a message about the Microsoft Store.
+7. **`harness/mutations/run.py` mutates in place and restores with git.** It refuses a dirty tree. If it is killed mid-defect, `git status` shows one modified file; `git checkout -- <file>` is the fix.
 
 ---
 

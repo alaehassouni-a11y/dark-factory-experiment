@@ -7,8 +7,12 @@
 -->
 
 **Current autonomy level: 4** - an untriaged issue is classified, planned, built,
-reviewed, independently validated and **merged** with no human in the chain. A person
-files the issues and promotes releases.
+reviewed, independently validated, **merged** and **deployed** with no human in the chain.
+A person files the issues. There is no promotion step and no release branch: the deploy
+timer on the VPS polls `main`, and a merged PR is serving clients on the next tick. The
+only brake is a hold file on the host (`/opt/virtualagent/.hold`), which holds the new
+colour built and health-checked but not live until a person flips it - a lever somebody
+reaches for, not a checkpoint every change passes through.
 **Level 5 is deliberately not the goal.** The factory does not write its own issues.
 **Stop button:** `.factory-stop` in the orchestrator's working copy (works with the
 network down) **and** the `factory:stop` label on any open issue (reachable from a
@@ -28,7 +32,7 @@ application did not. Every number below was re-measured against the new product.
 |---|---|---|
 | 1 | Workflow-driven repo | **Archon**, four YAML workflows in `.archon/workflows/`. State in GitHub labels |
 | 2 | The trigger | Pure-bash orchestrator on the VPS at `/opt/dark-factory/orchestrator.sh`, cron every 30 min, `MAX_PARALLEL=4` with per-target locks |
-| 3 | Deployment | `deploy/deploy.sh` - polls `main`, rebuilds the inactive colour, waits for the Docker healthcheck (which passes only once the wiki is indexed), swaps the Caddy upstream. Rollback is flipping it back. The live wiki is a host folder the service watches, mounted into both colours; documents do not go through this path |
+| 3 | Deployment | `deploy/deploy.sh` - polls `main` on a timer, rebuilds the inactive colour, waits for the Docker healthcheck (which passes only once the wiki is indexed), swaps the Caddy upstream. **Nothing sits between the merge and the swap but that healthcheck.** A hold file on the host stops the flip (built, checked, not live) and is the whole of the manual brake. Rollback is flipping it back. The live wiki is a host folder the service watches, mounted into both colours; documents do not go through this path |
 | 4 | Guidance layer | `MISSION.md` · `FACTORY_RULES.md` · `CLAUDE.md`, all three protected |
 | 5 | Validation harness | `harness/ci.py`, the whole gate, including the section 4 journey. See below |
 
@@ -89,7 +93,8 @@ python harness/ci.py
 Measured 2026-09-06 (75 = 66 service tests + 9 for the wiki import tool). Real, reproducible, and it needs no secrets: the stubs are an
 OpenAI-shaped model and a Brave-shaped search, so **the gate proves the pipeline, not
 the providers.** What the real model says to a real client is the mocked-boundary
-policy in `CLAUDE.md`, and a person checks it on the host after a merge.
+policy in `CLAUDE.md`, and nothing checks it before the merge is live: a person looks at
+the host afterwards, if they look. The gate is the last check that happens on purpose.
 
 Above the independence line:
 
@@ -115,7 +120,8 @@ Above the independence line:
 | The mutation runner excludes the E2E rung | A defect only the journey could catch escapes the mutation set; `mutations/run.py` says so in its header | D-006 |
 | The holdout has no liveness scenario | `sentences-only-at-the-end` is caught by the unit suite alone, below the independence line | D-006 |
 | The gate cannot hear | Whether the voice is intelligible, whether the first sentence arrives fast enough to feel live, is not a thing a stub can assert | D-005 |
-| The real wiki is one document | `virtualagent/resources/` holds the about-page only; the business's documents are not in yet, so the falsification test in the PRD ("most answers from the wiki") cannot be run | D-007 |
+| Nothing on GitHub requires the gate | `.github/workflows/gate.yml` runs it on every PR and every push to `main`, but no ruleset requires the check, and `main` still accepts merge commits and rebase merges against the squash-only rule. A merge from the web UI or a direct push is gated by nobody. Turning the check into a rule is a settings change a human makes; the steps are in `README.md` | `README.md` |
+| A merge is a deploy | No promotion step and no release branch: the timer flips `main` into production, so the healthcheck is the last thing between a merged PR and a client. Every flip also restarts the process, and sessions and the turn counter are in memory | D-010 |
 
 ## Incident log
 

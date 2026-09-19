@@ -1,0 +1,90 @@
+# The gate, run by GitHub on every pull request and on every push to main.
+#
+# This is the same ladder the factory runs (`harness/ci.py`), run a second time on
+# GitHub's own machines, so that a merge from the web UI or a direct push to main is
+# checked by something outside the factory's orchestrator. It needs no secrets: the
+# journey, the holdout and the mutation set all run against `harness/stubs.py`.
+#
+# IMPORTANT: this file only produces a check. It does not block anything until a human
+# switches on a ruleset that requires it - see README.md "Making the gate binding" and
+# FACTORY_RULES.md section 3. Until then a red `quick gate` is information, not a stop.
+#
+# Working directory: every rung is run from the repository root. `harness/static.py` and
+# `harness/unit.py` each `cd` into `app/backend` and `tools/wiki` themselves and carry
+# `--all-extras` on every `uv run`, so the two `uv sync` steps below are only a warm
+# cache, never the thing that makes the rungs work.
+
+name: gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quick:
+    name: quick gate (static + unit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Use Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Sync the service's environment
+        run: uv sync --all-extras
+        working-directory: app/backend
+
+      - name: Sync the wiki tool's environment
+        run: uv sync --all-extras
+        working-directory: tools/wiki
+
+      - name: python harness/ci.py --quick
+        run: python harness/ci.py --quick
+
+  full:
+    # Informational. The journey, the holdout and the mutation set take minutes and the
+    # mutation runner mutates files in place; a flake here must not be able to hold a PR
+    # hostage, so this job is allowed to fail. Read it, do not trust it as a gate.
+    name: full gate (journey, holdout, mutations) - informational
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Use Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Sync the service's environment
+        run: uv sync --all-extras
+        working-directory: app/backend
+
+      - name: Sync the wiki tool's environment
+        run: uv sync --all-extras
+        working-directory: tools/wiki
+
+      - name: python harness/ci.py
+        run: python harness/ci.py

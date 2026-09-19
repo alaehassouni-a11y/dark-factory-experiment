@@ -1,11 +1,14 @@
 # Normalize every text file to LF in the working tree, on every platform.
 #
-# Without this, a Windows checkout with core.autocrlf=true (the default) writes
-# CRLF, and `bun run lint` then fails on all 42 frontend source files with
-# format errors that do not exist on Linux — biome.json declares
-# "lineEnding": "lf". The factory validates on Linux and passes; a human
-# running the same gate on Windows sees 42 phantom failures. Same command,
-# different verdict, which is exactly the kind of gate you cannot trust.
+# This repository is written on Windows and runs on Linux: the factory's gate and
+# the VPS both check out on Linux, the owner's machine checks out with
+# core.autocrlf=true. Without this line the same file is a different file on the
+# two sides, and the failures that causes are the kind you cannot debug from the
+# error message: `ruff format --check` reporting every file in the service as
+# unformatted on one machine and none on the other, a shell script the host
+# refuses to run with `bad interpreter: /bin/sh^M`, a systemd unit that will not
+# parse. Same command, different verdict, which is exactly the kind of gate you
+# cannot trust.
 #
 # Git already stores LF in the object database, so this changes only what gets
 # written to disk. Run `git add --renormalize .` after editing this file.
@@ -21,14 +24,16 @@
 *.woff binary
 *.woff2 binary
 
-# Force LF on shell scripts and Dockerfile so they work on Linux when this
-# repo is checked out on Windows. These are now redundant with the blanket
-# rule above, but kept explicit because breaking them breaks the VPS.
+# Force LF on shell scripts and Dockerfile. Redundant with the blanket rule
+# above, and kept explicit because these are the files whose breakage is not
+# cosmetic: deploy.sh, host-wrapper.sh and factory-stop.sh are run by the host,
+# and a CRLF shebang line stops the deploy and the stop button.
 *.sh text eol=lf
 Dockerfile text eol=lf
 *.dockerfile text eol=lf
 
 # systemd unit files are parsed by systemd on the Linux host; CRLF causes
-# "Failed to parse" at install time.
+# "Failed to parse" at install time. deploy/ holds the deploy service, its
+# timer and the failure-alert unit.
 *.service text eol=lf
 *.timer text eol=lf
