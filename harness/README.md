@@ -10,14 +10,14 @@ Measured 2026-09-06 on `product/virtual-agent`, before the 2026-09-19 harness fi
 ```
 HARNESS_START mode=full driver=http
 STATIC_OK
-UNIT_PASSED tests=75
+UNIT_PASSED tests=78
 APP_STARTED port=61766
-E2E_PASSED steps=12
-HOLDOUT_PASSED scenarios=5 assertions=32
-MUTATIONS_TOTAL=8
+E2E_PASSED steps=25
+HOLDOUT_PASSED scenarios=6 assertions=47
+MUTATIONS_TOTAL=10
 MUTATIONS_CAUGHT=8
 MUTATIONS_NOT_INJECTED=0
-MUTATIONS_ABOVE_LINE=7
+MUTATIONS_ABOVE_LINE=10
 GATE_OK mode=full
 ```
 
@@ -94,12 +94,12 @@ required field now stops the gate instead of the first spoken sentence.
 ## What exists above the independence line
 
 ```
-python .factory/holdout/run.py     HOLDOUT_PASSED scenarios=5 assertions=32
-python harness/mutations/run.py    MUTATIONS_TOTAL=8 CAUGHT=8 NOT_INJECTED=0 ABOVE_LINE=7
+python .factory/holdout/run.py     HOLDOUT_PASSED scenarios=6 assertions=47
+python harness/mutations/run.py    MUTATIONS_TOTAL=10 CAUGHT=10 NOT_INJECTED=0 ABOVE_LINE=10
 ```
 
 - **Holdout** - `.factory/holdout/run.py`, five composed scenarios aimed at MISSION hard
-  invariants 1 through 5. **Written 2026-09-03 from the PRD and `docs/API.md`, before the
+  invariants 1 through 6. **Written 2026-09-03 from the PRD and `docs/API.md`, before the
   code existed**, against module names that did not yet exist; the implementation was
   built until they passed. That is the property in the right order. One mechanical
   adaptation since: the route walk descends into FastAPI 0.141's nested routers

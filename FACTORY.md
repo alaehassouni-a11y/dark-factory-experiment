@@ -78,15 +78,19 @@ the whole journey - and it is a smaller claim than "a client heard the answer".
 ```
 python harness/ci.py
   HARNESS_START mode=full driver=http
-  STATIC_OK
-  UNIT_PASSED tests=75
-  APP_STARTED port=61766
-  E2E_PASSED steps=12
-  HOLDOUT_PASSED scenarios=5 assertions=32
-  MUTATIONS_TOTAL=8
-  MUTATIONS_CAUGHT=8
+  PHRASES_OK cases=31
+  IOS_MANIFESTS_OK checks=33 swift_files=12
+  CONTRACT_OK events=4 fields=66 bodies=5
+  STATIC_OK checks=7
+  UNIT_PASSED tests=78
+  APP_STARTED port=52416
+  E2E_PASSED steps=25
+  HOLDOUT_PASSED scenarios=6 assertions=47
+  MUTATIONS_TOTAL=10
+  MUTATIONS_CAUGHT=10
   MUTATIONS_NOT_INJECTED=0
-  MUTATIONS_ABOVE_LINE=7
+  MUTATIONS_ABOVE_LINE=10
+  RATCHET_OK floors=9
   GATE_OK mode=full
 ```
 
@@ -99,7 +103,8 @@ the host afterwards, if they look. The gate is the last check that happens on pu
 Above the independence line:
 
 - **Holdout** - `.factory/holdout/run.py`, five composed scenarios aimed at MISSION hard
-  invariants 1 through 5, **written 2026-09-03 from the PRD before the code existed**.
+  invariants 1 through 6, **written 2026-09-03 from the PRD before the code existed**,
+  and extended on 2026-09-19 with invariant 6 and a liveness assertion.
   That is a holdout's first rule and this one follows it, which the previous product's
   did not. One mechanical adaptation since (the route walk descends into FastAPI
   0.141's nested routers); the assertions are the ones written on the day.
