@@ -5,20 +5,25 @@ description: |
             whose only client is an iOS app).
   Triggers: Orchestrator dispatch when an issue is labeled `factory:accepted`.
   Does: Classifies the issue, researches context, investigates (bugs) or plans (features),
-        implements the fix with uv-managed Python tooling, runs the Dark Factory validator
-        (ruff/mypy/pytest + MISSION invariant guard), creates a draft PR, runs smart review,
-        self-fixes findings, simplifies, and reports back to the issue.
-  NOT for: Triage (use dark-factory-triage), PR validation (use dark-factory-validate-pr),
-           PR fix-up from failed validation (use dark-factory-fix-pr).
+        implements the fix with uv-managed Python tooling, checks scope in bash (protected
+        paths and the 500-line cap), runs the REAL quick gate (`python harness/ci.py
+        --quick`) with a repair pass and a re-run that must come back green, checks the
+        stop button, creates a draft PR, runs smart review, self-fixes findings,
+        simplifies, and reports back to the issue.
+  NOT for: Triage (use dark-factory-triage), or PR validation and its repair pass —
+           both live in dark-factory-validate-pr, which runs one fresh-context repair
+           pass inside itself and then escalates. There is no separate fix-PR workflow.
 
   This is a fork of the bundled `archon-fix-github-issue` that the Dark Factory owns.
   It can evolve independently from the bundled default. The key divergences:
   - Every AI node references a `.md` command file (no inline prompts — Dark Factory rule).
   - Implementation uses `dark-factory-fix-issue` (uv dep install, Virtual Agent-specific
     sanity checks: the service must still import).
-  - Validation uses `dark-factory-validate` (ruff/mypy/pytest, the same rungs as
-    `python harness/ci.py --quick`, + MISSION invariant guard) instead of the bundled
-    JS-only `archon-validate`.
+  - Validation is bash running `python harness/ci.py --quick` itself (nodes `gate-quick`
+    and `gate-recheck`), not a prose copy of it: `dark-factory-validate` is now only the
+    repair pass between the two. The prose copy had drifted — it ran ruff/mypy/pytest
+    under app/backend only, missing tools/wiki, so a change there passed here and failed
+    at the validator on both fix attempts.
   - The four prompts that were inline in the bundled workflow (extract-issue-number,
     classify, create-pr, review-classify) are now separate command files under
     `.archon/commands/dark-factory-*.md`.
@@ -45,7 +50,36 @@ nodes:
         echo "Failed to extract issue number from: $extract-issue-number.output" >&2
         exit 1
       fi
-      gh issue view "$ISSUE_NUM" --json title,body,labels,comments,state,url,author
+      ISSUE_JSON=$(gh issue view "$ISSUE_NUM" --json title,body,labels,comments,state,url,author)
+
+      # Refuse to start on an issue that is not ours to work on. The
+      # orchestrator dispatches every 30 minutes on a label query, and
+      # without this guard a closed issue, an issue a human has taken
+      # over, or an issue whose acceptance was withdrawn is picked up
+      # again and again, each pass spending a full research + plan +
+      # implement cycle and one of the four parallel slots.
+      # FACTORY_RULES §7: all activity stops on an escalated issue.
+      STATE=$(echo "$ISSUE_JSON" | jq -r '.state')
+      LABELS=$(echo "$ISSUE_JSON" | jq -r '[.labels[].name] | join(" ")')
+      if [ "$STATE" != "OPEN" ]; then
+        echo "REFUSING: issue #$ISSUE_NUM is $STATE, not OPEN." >&2
+        exit 1
+      fi
+      case " $LABELS " in
+        *" factory:needs-human "*)
+          echo "REFUSING: issue #$ISSUE_NUM is escalated (factory:needs-human). A human is the next actor." >&2
+          exit 1
+          ;;
+      esac
+      case " $LABELS " in
+        *" factory:accepted "*) : ;;
+        *)
+          echo "REFUSING: issue #$ISSUE_NUM does not carry factory:accepted. Labels: $LABELS" >&2
+          exit 1
+          ;;
+      esac
+
+      echo "$ISSUE_JSON"
     depends_on: [extract-issue-number]
     timeout: 20000
 
@@ -120,21 +154,161 @@ nodes:
     context: fresh
 
   # ═══════════════════════════════════════════════════════════════
-  # PHASE 5: VALIDATE (Dark Factory fork — ruff/mypy/pytest + MISSION invariants)
+  # PHASE 5: SCOPE GUARD, THEN THE REAL GATE
   # ═══════════════════════════════════════════════════════════════
+  # Two rules that used to exist only as sentences in a prompt:
+  # "do not touch a protected path" and "keep a PR under 500 lines"
+  # (FACTORY_RULES §2, §5). A model reading a diff is not an
+  # enforcement mechanism. Both are now bash, and both refuse to open
+  # a PR rather than spending a whole validator run to be told no.
 
+  - id: check-scope
+    bash: |
+      set -uo pipefail
+      LIST="$PWD/.factory/protected-paths.txt"
+      BASE="${FACTORY_BASE_REF:-origin/main}"
+      git fetch --quiet origin main 2>/dev/null || true
+      MB=$(git merge-base "$BASE" HEAD 2>/dev/null || git rev-parse "$BASE" 2>/dev/null || echo "")
+      if [ -z "$MB" ]; then
+        echo "SCOPE_UNKNOWN: cannot resolve $BASE, refusing to guess" >&2
+        exit 1
+      fi
+
+      CHANGED=$(git diff --name-only "$MB"...HEAD | tr -d '\r')
+      if [ -z "$CHANGED" ]; then
+        echo "SCOPE_EMPTY: the implementation changed nothing" >&2
+        exit 1
+      fi
+
+      VIOLATION=""
+      if [ -f "$LIST" ]; then
+        while IFS= read -r pattern; do
+          pattern="${pattern%%#*}"
+          pattern=$(echo "$pattern" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+          [ -n "$pattern" ] || continue
+          case "$pattern" in '!'*|'?'*) continue ;; esac
+          for f in $CHANGED; do
+            case "$f" in
+              $pattern) VIOLATION="$VIOLATION $f" ;;
+            esac
+          done
+        done < "$LIST"
+      else
+        echo "WARNING: $LIST is missing; falling back to the hardcoded core set" >&2
+        for f in $CHANGED; do
+          case "$f" in
+            app/backend/auth.py|app/backend/rate_limit.py|app/backend/languages.py|\
+            app/backend/config.py|app/backend/main.py|app/backend/llm/openrouter.py|\
+            app/backend/agent/pipeline.py|app/backend/routes/sessions.py|\
+            harness/*|.factory/*|deploy/*|.github/*|MISSION.md|FACTORY_RULES.md|CLAUDE.md)
+              VIOLATION="$VIOLATION $f" ;;
+          esac
+        done
+      fi
+
+      STAT=$(git diff --shortstat "$MB"...HEAD)
+      ADD=$(echo "$STAT" | grep -oE '[0-9]+ insertion' | grep -oE '[0-9]+' || echo 0)
+      DEL=$(echo "$STAT" | grep -oE '[0-9]+ deletion' | grep -oE '[0-9]+' || echo 0)
+      TOTAL=$(( ${ADD:-0} + ${DEL:-0} ))
+
+      ISSUE_NUM=$(echo "$extract-issue-number.output" | tr -d "'\"\`\n " | grep -oE '[0-9]+' | head -1)
+      FAILED=0
+      if [ -n "$VIOLATION" ]; then
+        echo "PROTECTED_TOUCHED path=$VIOLATION"
+        FAILED=1
+      else
+        echo "PROTECTED_CLEAN"
+      fi
+      if [ "$TOTAL" -gt 500 ]; then
+        echo "SIZE_EXCEEDED lines=$TOTAL"
+        FAILED=1
+      else
+        echo "SIZE_OK lines=$TOTAL"
+      fi
+
+      if [ "$FAILED" -eq 1 ]; then
+        if [ -n "$ISSUE_NUM" ]; then
+          BODY=$(printf '%s\n\n%s\n%s\n\n%s\n' \
+            "**Dark Factory:** stopped before opening a PR." \
+            "Protected paths touched:${VIOLATION:- none}" \
+            "Diff size: ${TOTAL} lines (limit 500)." \
+            "A protected path (FACTORY_RULES section 5, .factory/protected-paths.txt) must be human-authored, and a change over 500 lines must be split into smaller issues. No PR was opened and nothing was pushed.")
+          gh issue edit "$ISSUE_NUM" --add-label "factory:needs-human" 2>/dev/null || true
+          gh issue comment "$ISSUE_NUM" --body "$BODY" 2>/dev/null || true
+        fi
+        exit 1
+      fi
+    depends_on: [implement]
+    timeout: 60000
+
+  # The gate itself, not a prose copy of it. dark-factory-validate.md used
+  # to re-implement ruff/mypy/pytest by hand and had drifted: it ran them
+  # under app/backend only, so a change to tools/wiki (an allowed
+  # placement) passed here and failed at the validator, burning both fix
+  # attempts. One command, one ladder, one answer.
+  - id: gate-quick
+    bash: |
+      set -uo pipefail
+      export PATH="$HOME/.local/bin:$PATH"
+      PYTHON=$(command -v python || command -v python3)
+      if [ -z "$PYTHON" ]; then
+        echo "GATE_ENV_MISSING: no python on PATH" >&2
+        exit 1
+      fi
+      "$PYTHON" harness/ci.py --quick 2>&1 | tee "$ARTIFACTS_DIR/gate-quick.log"
+      if grep -q "GATE_OK mode=quick" "$ARTIFACTS_DIR/gate-quick.log"; then
+        echo "BUILDER_GATE_GREEN"
+      else
+        echo "BUILDER_GATE_RED"
+      fi
+    depends_on: [check-scope]
+    timeout: 900000
+
+  # Only a repair pass. If the gate is already green it has nothing to do.
   - id: validate
     command: dark-factory-validate
-    depends_on: [implement]
+    depends_on: [gate-quick]
     context: fresh
 
+  # The rung again, and this time it is allowed to fail the run. create-pr
+  # cannot be reached with a red gate.
+  - id: gate-recheck
+    bash: |
+      set -uo pipefail
+      export PATH="$HOME/.local/bin:$PATH"
+      PYTHON=$(command -v python || command -v python3)
+      "$PYTHON" harness/ci.py --quick 2>&1 | tee "$ARTIFACTS_DIR/gate-recheck.log"
+      if ! grep -q "GATE_OK mode=quick" "$ARTIFACTS_DIR/gate-recheck.log"; then
+        echo "GATE_STILL_RED: refusing to open a PR" >&2
+        exit 1
+      fi
+      echo "BUILDER_GATE_GREEN"
+    depends_on: [validate]
+    timeout: 900000
+
   # ═══════════════════════════════════════════════════════════════
-  # PHASE 6: CREATE DRAFT PR
+  # PHASE 6: STOP BUTTON, THEN CREATE DRAFT PR
   # ═══════════════════════════════════════════════════════════════
+
+  # The stop button halted new dispatch only, so after `touch .factory-stop`
+  # up to four in-flight runs kept going and still opened PRs. This run is
+  # about to do the one outward-facing thing it does; ask first.
+  - id: check-stop
+    bash: |
+      set -uo pipefail
+      if [ -f scripts/factory-stop.sh ]; then
+        if ! FACTORY_WORKDIR="$PWD" bash scripts/factory-stop.sh; then
+          echo "STOPPED: not opening a PR." >&2
+          exit 1
+        fi
+      fi
+      echo "STOP_CHECK_CLEAR"
+    depends_on: [gate-recheck]
+    timeout: 60000
 
   - id: create-pr
     command: dark-factory-create-pr
-    depends_on: [validate]
+    depends_on: [check-stop]
     context: fresh
 
   # Deterministic PR number capture: reads .pr-number if the AI wrote it,
@@ -151,16 +325,35 @@ nodes:
           exit 0
         fi
       fi
-      PR=$(gh pr view --json number -q '.number' 2>/dev/null || true)
-      if [ -n "$PR" ]; then
-        echo "$PR" > "$ARTIFACTS_DIR/.pr-number"
-        echo "$PR"
-      else
-        echo "WARNING: could not determine PR number" >&2
-        echo "0"
+      if [ -z "${PR:-}" ]; then
+        PR=$(gh pr view --json number -q '.number' 2>/dev/null || true)
       fi
+
+      # This used to print "0" and exit 0 when no PR could be found, so a
+      # failed creation flowed on as `gh pr view 0` through ten downstream
+      # nodes that all reported success. A missing PR is a failed run.
+      if [ -z "$PR" ] || ! echo "$PR" | grep -qE '^[0-9]+$'; then
+        echo "ERROR: no PR was created; refusing to continue with a placeholder number" >&2
+        exit 1
+      fi
+      echo "$PR" > "$ARTIFACTS_DIR/.pr-number"
+
+      # FACTORY_RULES §2: the PR body must close its issue. The validator
+      # reads the linked issue as the contract it judges against, so a body
+      # without the link costs a full validation run to discover.
+      ISSUE_NUM=$(echo "$extract-issue-number.output" | tr -d "'\"\`\n " | grep -oE '[0-9]+' | head -1)
+      if [ -n "$ISSUE_NUM" ]; then
+        BODY=$(gh pr view "$PR" --json body -q '.body' 2>/dev/null || echo "")
+        if ! echo "$BODY" | grep -qiE "(fixes|closes|resolves) #${ISSUE_NUM}([^0-9]|$)"; then
+          echo "ERROR: PR #$PR body does not close issue #$ISSUE_NUM (needs 'Fixes #${ISSUE_NUM}' on its own line)" >&2
+          exit 1
+        fi
+      fi
+
+      # stdout stays exactly the number: downstream nodes use it as the PR ref.
+      echo "$PR"
     depends_on: [create-pr]
-    timeout: 15000
+    timeout: 30000
 
   # ═══════════════════════════════════════════════════════════════
   # PHASE 7: REVIEW
@@ -285,9 +478,36 @@ nodes:
         echo "No issue number parsed — nothing to clean up"
         exit 0
       fi
-      # --remove-label is idempotent (succeeds if the label isn't present)
-      gh issue edit "$ISSUE_NUM" --remove-label "factory:in-progress" 2>&1 || true
-      echo "Cleared factory:in-progress from issue #$ISSUE_NUM"
+      # Branch on whether this run actually produced a PR. Clearing the
+      # label unconditionally was a silent 30-minute loop: a run that died
+      # before create-pr left no PR, no comment and no label, so the
+      # orchestrator's "accepted and not in-progress" query matched the
+      # issue again on the next tick, and again, each time spending a full
+      # research + plan + implement cycle and one of four parallel slots.
+      # The mirror image of the 2026-05 starvation incident in FACTORY.md.
+      if [ -s "$ARTIFACTS_DIR/.pr-number" ] && grep -qE '^[0-9]+$' "$ARTIFACTS_DIR/.pr-number"; then
+        PR=$(tr -d ' \n\r' < "$ARTIFACTS_DIR/.pr-number")
+        # --remove-label is idempotent (succeeds if the label isn't present)
+        gh issue edit "$ISSUE_NUM" --remove-label "factory:in-progress" 2>&1 || true
+        echo "Cleared factory:in-progress from issue #$ISSUE_NUM (work now lives on PR #$PR)"
+      else
+        # No PR: hand the issue over rather than letting it be re-dispatched.
+        # FACTORY_RULES §11 asks the comment to name what failed.
+        FAILED_NODE="unknown"
+        for n in check-scope gate-quick gate-recheck check-stop create-pr; do
+          if [ -f "$ARTIFACTS_DIR/gate-quick.log" ] && [ "$n" = "gate-quick" ]; then
+            grep -q "GATE_OK mode=quick" "$ARTIFACTS_DIR/gate-quick.log" || FAILED_NODE="gate-quick"
+          fi
+        done
+        gh issue edit "$ISSUE_NUM" \
+          --remove-label "factory:in-progress" \
+          --add-label "factory:needs-human" 2>&1 || true
+        BODY=$(printf '%s\n\n%s\n' \
+          "**Dark Factory:** this run ended without opening a PR." \
+          "Last known failing step: ${FAILED_NODE}. The issue is labelled factory:needs-human so it is not picked up again on the next dispatch; remove that label to let the factory retry.")
+        gh issue comment "$ISSUE_NUM" --body "$BODY" 2>&1 || true
+        echo "No PR produced: escalated issue #$ISSUE_NUM to factory:needs-human"
+      fi
     depends_on: [report]
     trigger_rule: all_done
-    timeout: 15000
+    timeout: 30000

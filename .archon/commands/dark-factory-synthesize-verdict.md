@@ -1,6 +1,6 @@
 ---
 description: Final arbiter for Dark Factory PR validation. Aggregates behavioral, security, code review, and static check results into an approve/request_changes/reject verdict.
-argument-hint: (no arguments — reads $gate, $static-checks-backend-p1, $run-tests-backend-p1, $behavioral-validation-p1, $behavioral-e2e-p1, $security-check-p1, $code-review-p1, $fetch-base-governance)
+argument-hint: (no arguments — reads $gate, $check-protected-paths, $behavioral-validation-p1, $behavioral-e2e-p1, $security-check-p1, $code-review-p1, $fetch-base-governance)
 ---
 
 # Dark Factory Validation — Synthesize Verdict
@@ -38,11 +38,21 @@ $start-app.output
 ### The Gate (harness/ci.py then harness/ratchet.py — marker lines only; the full log is an artifact)
 $gate.output
 
-### Static Checks — Service
-$static-checks-backend-p1.output
+This is the ONLY source for static checks and unit tests. `STATIC_OK` is ruff,
+ruff format, mypy and `harness/static_ios.py`; `UNIT_PASSED tests=N` is the
+pytest suite. There are no separate static-checks or run-tests nodes any more:
+they duplicated these two rungs and read the worktree while the gate's mutation
+rung was rewriting files in place, so they reported defects the judge injected.
 
-### Service Tests
-$run-tests-backend-p1.output
+### Protected Paths and PR Size (deterministic — FACTORY_RULES §5 and §8)
+$check-protected-paths.output
+
+`PROTECTED_CLEAN` plus `SIZE_OK` means the PR changed nothing on
+`.factory/protected-paths.txt` and stayed inside 500 lines.
+`PROTECTED_TOUCHED path=...` or `SIZE_EXCEEDED` is a hard REJECT.
+`PROTECTED_PARTIAL path=...` is not a verdict: it names a file whose invariant
+lives in part of it, and tells you to weigh the security and code reviewers'
+reading of that diff rather than reject on the filename alone.
 
 ### Behavioral Validation (the holdout verdict)
 $behavioral-validation-p1.output
@@ -73,7 +83,7 @@ If the validator's own infrastructure did not complete, you CANNOT render a subs
 
 **FORBIDDEN escape hatch — read carefully.** `not_e2e_testable` is a legitimate enum value in the output schema for `e2e_status` and `behavioral_status`, but it means one specific thing: *the PR diff legitimately cannot be exercised through the API* (e.g., a docs-only change, a change confined to the iOS app, a comment-only change). It does NOT mean "the E2E node didn't produce output" or "the app failed to start." If `$start-app.output` is empty or lacks `APP_STARTED`, or if `$checkout-pr.output` lacks `Checked out PR #`, or if `$behavioral-e2e-p1.output` is empty because its upstream dependency failed — you are **FORBIDDEN** from returning `e2e_status: "not_e2e_testable"` or `behavioral_status: "not_e2e_testable"`. Those cases are infrastructure failures, not untestable diffs, and you MUST fire rule 0 below with `e2e_status: "no"` and `behavioral_status: "no"`. Returning `not_e2e_testable` to paper over a missing `APP_STARTED` marker is a validator bug and defeats the entire purpose of rule 0.
 
-Additionally, if `$gate.output`, `$static-checks-backend-p1.output`, `$run-tests-backend-p1.output`, or `$behavioral-e2e-p1.output` is empty (no content at all — meaning the node was skipped because its upstream dependency failed), that is also an infrastructure failure even if `checkout-pr.output` looks fine.
+Additionally, if `$gate.output` or `$behavioral-e2e-p1.output` is empty (no content at all — meaning the node was skipped because its upstream dependency failed), that is also an infrastructure failure even if `checkout-pr.output` looks fine.
 
 In any of those cases, return:
 
@@ -102,28 +112,35 @@ Reject immediately if ANY of:
 5. `behavioral-validation.solves_issue == "no"` AND PR diff is empty/trivial (per behavioral reasoning)
 6. `code-review` output contains any `severity: critical` finding
 7. PR touches any MISSION hard invariant per CLAUDE.md §The Contract That Must Not Regress (the language set, wiki before web, the declared source, the session token check, the turn cap, the provider)
-8. `$gate.output` (or `$gate-p2.output` in pass 2) contains `GATE_FAILED: holdout`, `GATE_FAILED: mutations`, or `RATCHET_FAILED` — the holdout the builder cannot read, the mutation set, or a ratchet floor went red. Either a MISSION invariant broke or the judge itself was touched. Always `should_escalate: true`.
+8. `$gate.output` contains `GATE_FAILED: holdout`, `GATE_FAILED: mutations`, or a line matching `RATCHET_FAILED floors=` / `  RATCHET_FAIL ` — the holdout the builder cannot read, the mutation set, or a ratchet floor went red. Either a MISSION invariant broke or the judge itself was touched. Always `should_escalate: true`.
 
-A rejected PR has its issue re-queued (label flipped back to `factory:accepted`) and the PR closed. Set `should_escalate: false` unless rejection #7 or #8 fires — hard-invariant violations and a red holdout, mutation set or ratchet always escalate to human.
+   **Match those exact forms, not the bare substring `RATCHET_FAILED`.** `harness/ratchet.py` prints `RATCHET_FAILED floors=N failures=M` (with a `  RATCHET_FAIL <floor>` line per failure) for a genuine floor violation, and that is the only form that belongs here. `RATCHET_SKIPPED gate_red` means the gate was red so the ratchet was never run against it; that is a build failure, not a lowered floor, and it belongs in REQUEST_CHANGES below. Treating any red build as a floor violation sent every ruff error and failing test to a human and made the fix pass unreachable.
+
+   **`RATCHET_STALE key=<floor> base=<ref>` is not tampering either.** It means this PR branched before a human raised that floor on the base branch, so the PR's own floor file is merely old. The fix is a rebase, not an escalation: put it in REQUEST_CHANGES with `issues_to_fix` saying to rebase onto the base branch and re-run. Only `RATCHET_FAILED floors=` means a floor was lowered inside the PR.
+
+9. `$check-protected-paths.output` contains `PROTECTED_TOUCHED path=...` or `SIZE_EXCEEDED`, or lacks both `PROTECTED_CLEAN` and `SIZE_OK` — the PR changed a file on `.factory/protected-paths.txt`, blew the 500-line cap, or the check could not run. FACTORY_RULES §5 and §6.1: close the PR, and per §7 escalate the issue too, because a factory PR reaching for the judge or the constitution means the scope was misunderstood. Always `should_escalate: true`. (apply-verdict enforces this in bash as well; you should reach the same answer.)
+
+A rejected PR has its issue re-queued (label flipped back to `factory:accepted`) and the PR closed. Set `should_escalate: false` unless rejection #7, #8 or #9 fires — hard-invariant violations, a red holdout, mutation set or ratchet, and a protected-path or size breach always escalate to human.
 
 ### APPROVE — auto-merge via squash
 
 Approve if ALL of:
 
 1. **The gate is green (FACTORY_RULES §3 gates 1-6)**: `$gate.output` contains both `GATE_OK mode=full` and `RATCHET_OK`. Nothing else on this list can substitute for it.
-2. Static checks: `$static-checks-backend-p1.output` reports ruff-lint, ruff-fmt and mypy PASS
-3. Service tests: pytest output shows `passed` count > 0 and no `failed`. There is no legitimate skip: the suite exists and every PR must keep it green
+2. Static checks: `$gate.output` contains `STATIC_OK`
+3. Service tests: `$gate.output` contains `UNIT_PASSED tests=N` with N > 0. There is no legitimate skip: the suite exists and every PR must keep it green
+3b. Scope: `$check-protected-paths.output` contains both `PROTECTED_CLEAN` and `SIZE_OK`
 4. `behavioral-validation.solves_issue == "yes"` AND `scope_appropriate == "yes"` AND `regressions_detected` is empty
 5. **E2E gate (mandatory per FACTORY_RULES §3 + §4)**: EITHER `behavioral-e2e.solves_issue == "yes"` AND `behavioral-e2e.app_booted == true` AND `regressions_observed` is empty, OR `behavioral-e2e.solves_issue == "not_e2e_testable"` AND `behavioral-e2e.app_booted == true` (used only when the diff legitimately has no API surface — docs, the iOS app only, a comment change). `app_booted == false` is never approve-compatible; if it's false, rule 0 already fired.
 6. `security-check.verdict == "pass"` AND `governance_files_modified == false`
 7. `code-review` finds no critical or high severity issues (medium and low are acceptable and documented for follow-up)
 8. `behavioral-validation.confidence != "low"` — low confidence behavioral verdicts never auto-approve, they become request_changes
 
-### REQUEST_CHANGES — send back to dark-factory-fix-pr
+### REQUEST_CHANGES — hand to the repair pass inside this workflow
 
 Request changes in all other cases, which typically include:
 
-- `$gate.output` contains `GATE_FAILED: static`, `GATE_FAILED: unit` or `GATE_FAILED: e2e` — the build is red in a rung a fix workflow can address
+- `$gate.output` contains `GATE_FAILED: static`, `GATE_FAILED: unit` or `GATE_FAILED: e2e` — the build is red in a rung a fix workflow can address. `RATCHET_SKIPPED gate_red` accompanies these and changes nothing: it only says the ratchet had no green log to measure
 - Static check failures (lint, format, type errors that a fix workflow can address)
 - Test failures (assuming the tests are legitimate and not gamed)
 - `behavioral-validation.solves_issue == "partially"` — the coder got some but not all of the asks
@@ -132,8 +149,8 @@ Request changes in all other cases, which typically include:
 - High-severity code review findings (but not critical)
 - Behavioral confidence is `"low"` — kick back for clarification instead of auto-approving
 
-**Escalation inside request_changes**: Set `should_escalate: true` (flip label to `factory:needs-human` instead of `factory:needs-fix`) if:
-- This is already the 2nd fix attempt on this PR (check for `factory:needs-fix` appearing twice in PR labels — but actually, the orchestrator enforces the 2-attempt cap, so just trust its dispatch; only escalate here if the issues look un-fixable even in principle, e.g., "the entire approach is wrong but not wrong enough to reject outright")
+**Escalation inside request_changes**: Set `should_escalate: true` (flip the label to `factory:needs-human`; `factory:needs-fix` has no consumer and is a dead end) if:
+- The issues look un-fixable in principle, e.g. "the entire approach is wrong but not wrong enough to reject outright". There is no 2-attempt cap and no separate fix-PR workflow: this workflow runs exactly ONE fresh-context repair pass and then escalates on its own, so request_changes here means "repair it now", not "queue another attempt".
 - The same issue appears twice in consecutive fix cycles (stuck)
 - Test failures are opaque and can't be actioned from the output alone
 
@@ -145,7 +162,7 @@ Return structured JSON matching the schema enforced by the workflow node:
 
 - `verdict`: `"approve" | "request_changes" | "reject"`
 - `summary`: one or two sentence plain-English verdict statement (what happened and why)
-- `static_checks_status`: `"pass" | "fail"` — aggregated across the gate's static rung and the static-checks node
+- `static_checks_status`: `"pass" | "fail"` — read from the gate's `STATIC_OK` marker
 - `tests_status`: `"pass" | "fail" | "skipped"`
 - `behavioral_status`: copy of `$behavioral-validation-p1.output.solves_issue`
 - `security_status`: copy of `$security-check-p1.output.verdict`
@@ -158,7 +175,7 @@ Return structured JSON matching the schema enforced by the workflow node:
 - `escalation_reason`: string (empty if `should_escalate` is false)
 - `reasoning`: 1-3 paragraphs walking through which rule matched and why
 
-Make `issues_to_fix` SPECIFIC. The `dark-factory-fix-pr` workflow reads this list and acts on it — vague entries like "improve error handling" are useless. Say: "In `app/backend/search/web.py`, a 200 with a non-JSON body reaches `r.json()` unguarded — catch `ValueError`, log, and return no results per CLAUDE.md §Code Conventions (Errors), so the agent never crashes mid-conversation."
+Make `issues_to_fix` SPECIFIC. The repair pass (`dark-factory-fix-pr-issues`, run inside this workflow) reads this list and acts on it — vague entries like "improve error handling" are useless. Say: "In `app/backend/search/web.py`, a 200 with a non-JSON body reaches `r.json()` unguarded — catch `ValueError`, log, and return no results per CLAUDE.md §Code Conventions (Errors), so the agent never crashes mid-conversation."
 
 ---
 

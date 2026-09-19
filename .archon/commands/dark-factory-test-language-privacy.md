@@ -36,7 +36,7 @@ Do NOT read source code.
    `SESSION_A` and `TOKEN_A`.
 3. Send an Arabic question on session A (exactly):
    `{"text":"ما هي ساعات العمل لديكم؟"}`
-   Save the SSE body to `$ARTIFACTS_DIR/test-conversation-history-ar.txt`
+   Save the SSE body to `$ARTIFACTS_DIR/test-language-privacy-ar.txt`
    and wait for `data: [DONE]`.
 4. Verify the `event: language` frame has `"language": "ar"` and
    `"voice_locale": "ar-SA"`, and that at least one `event: sentence`
@@ -47,21 +47,21 @@ Do NOT read source code.
    assert `201`, capture `SESSION_B` and `TOKEN_B`.
 6. Send a Spanish sentence on session B (exactly):
    `{"text":"¿Dónde está el baño, por favor?"}`
-   Save the SSE body to `$ARTIFACTS_DIR/test-conversation-history-es.txt`.
+   Save the SSE body to `$ARTIFACTS_DIR/test-language-privacy-es.txt`.
 7. Verify: the `event: language` frame has `"language": null`; the
    `event: turn` frame has `"kind": "question"` and `"source": "none"`;
    and at least one `event: sentence` frame exists (the agent ASKED, out
    loud, for a supported language). An `answer` turn, a `wiki` or `web`
    source, or a detected language of `es` is a FAIL.
 8. Privacy: read session A with session B's token:
-   `curl -s -o "$ARTIFACTS_DIR/test-conversation-history-403.txt" -w '%{http_code}' "$BASE/api/sessions/$SESSION_A" -H "Authorization: Bearer $TOKEN_B"`
+   `curl -s -o "$ARTIFACTS_DIR/test-language-privacy-403.txt" -w '%{http_code}' "$BASE/api/sessions/$SESSION_A" -H "Authorization: Bearer $TOKEN_B"`
    The status MUST be `403`. Then read session A with no token at all and
    assert `401`. Then read it with `TOKEN_A`, save the transcript to
-   `$ARTIFACTS_DIR/test-conversation-history-transcript.txt`, and assert
+   `$ARTIFACTS_DIR/test-language-privacy-transcript.txt`, and assert
    `200` with the greeting, the Arabic client turn and the agent answer
    listed in `turns`.
 9. `DELETE` both sessions with their own tokens.
-10. Write a markdown summary to `$ARTIFACTS_DIR/test-conversation-history.md`
+10. Write a markdown summary to `$ARTIFACTS_DIR/test-language-privacy.md`
     including the detected languages, the verbatim `turn` frame from the
     Spanish turn, the three status codes from step 8, and the evidence
     paths.

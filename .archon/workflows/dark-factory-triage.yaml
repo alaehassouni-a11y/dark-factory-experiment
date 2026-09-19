@@ -1,12 +1,17 @@
 name: dark-factory-triage
 description: |
   Use when: Orchestrator needs to batch-classify untriaged GitHub issues for the Dark Factory experiment.
-  Triggers: Orchestrator invokes when open issues exist without any factory:* label.
-  Does: Reads MISSION.md + FACTORY_RULES.md, classifies up to 10 issues against the rules,
-        and either accepts them into the factory queue or rejects+closes them with a reason.
-  NOT for: Implementing issues, reviewing PRs, or human-in-the-loop triage. Triage has two
-           verdicts only -- accept or reject. Ambiguous issues are rejected with an
-           explanation; the human can reopen with more context if they disagree.
+  Triggers: Orchestrator invokes when open issues exist carrying no factory STATE label
+            (factory:triaging / accepted / needs-human / in-progress / rate-limited / stop).
+            A marker label such as factory:from-comprehensive-test is not a state and does
+            not exclude an issue -- that is how the weekly run's findings reach the queue.
+  Does: Reads MISSION.md + FACTORY_RULES.md + .factory/decisions.md, classifies up to 10
+        issues against the rules, and accepts them into the factory queue, rejects+closes
+        them with a reason, or hands them to the repository owner.
+  NOT for: Implementing issues or reviewing PRs. Triage has three verdicts -- accept,
+           reject, needs_human. Ambiguous issues are rejected with an explanation and the
+           filer may reopen with more context, which puts the issue back in the queue;
+           issues FACTORY_RULES §1 reserves for a human get needs_human and stay open.
 
 provider: claude
 model: sonnet
@@ -34,53 +39,101 @@ nodes:
       DAILY_CAP=3
       TODAY_UTC=$(date -u '+%Y-%m-%d')
 
-      # ── Step 1: Unstick yesterday's rate-limited issues ─────────
-      # Any open issue labeled factory:rate-limited whose createdAt
-      # is on a prior UTC date gets the label removed so this cycle
-      # re-evaluates it. A fresh triage classification will then
-      # either accept, reject, or re-rate-limit it based on today's
-      # author count.
-      gh issue list --state open --label "factory:rate-limited" --limit 100 \
-        --json number,createdAt \
-        | jq -r --arg today "$TODAY_UTC" '.[] | select((.createdAt | split("T")[0]) < $today) | .number' \
-        | while read -r num; do
-          if [ -n "$num" ]; then
-            gh issue edit "$num" --remove-label "factory:rate-limited" 2>/dev/null || true
-            echo "Unstuck rate-limited issue #$num (created before $TODAY_UTC)" >&2
-          fi
-        done
+      # The labels that mean "this issue already has a place in the
+      # factory's state machine". Triage must skip exactly these and
+      # nothing else. It used to skip every label beginning with
+      # `factory:`, which quietly swallowed two whole classes of
+      # issue: the ones the weekly regression run files (they carry
+      # factory:from-comprehensive-test, a MARKER, not a state) and
+      # the remote stop button's own label. The self-healing loop
+      # FACTORY_RULES §4 describes was open at this exact join.
+      #
+      # factory:rejected is deliberately NOT in this set. §1 invites a
+      # filer to reopen a rejected issue with more context, and an
+      # issue that is open again is an issue to re-read. apply-decisions
+      # clears the stale label before recording the new verdict.
+      #
+      # factory:stop IS in it: an issue carrying the stop label is the
+      # off switch, not a feature request, and classifying it would be
+      # absurd.
+      STATE_LABELS="factory:triaging factory:accepted factory:needs-human factory:in-progress factory:rate-limited factory:stop"
+      SEARCH_EXCLUSIONS=""
+      for L in $STATE_LABELS; do SEARCH_EXCLUSIONS="$SEARCH_EXCLUSIONS -label:$L"; done
+      STATE_LABELS_JSON=$(printf '%s\n' $STATE_LABELS | jq -R . | jq -s .)
 
-      # ── Step 2: Count today's issues per non-owner author ───────
-      # Pull all issues (open + closed) created today so we count the
-      # author's full daily footprint, not just what's still open.
-      TODAY_ISSUES=$(gh issue list --state all --limit 200 \
-        --json number,author,createdAt,labels \
-        | jq --arg today "$TODAY_UTC" --arg owner "$OWNER" '
-            [.[] | select(
-              (.createdAt | split("T")[0]) == $today
-              and .author.login != $owner
-            )]
-          ')
+      # Labels that mean the issue has been through triage at least
+      # once. Used to measure how much of an author's daily budget
+      # has already been spent (see step 2).
+      TRIAGED_LABELS_JSON='["factory:triaging","factory:accepted","factory:rejected","factory:needs-human","factory:in-progress"]'
 
-      # ── Step 3: Apply factory:rate-limited to over-cap authors ──
-      # For each author with > DAILY_CAP issues today, sort by
-      # createdAt and rate-limit everything past the first DAILY_CAP.
-      # We only add the label if it's not already present, so re-runs
-      # are idempotent.
-      echo "$TODAY_ISSUES" | jq -r --argjson cap "$DAILY_CAP" '
+      # ── Step 1: How much budget has each author spent today? ────
+      # The old code released EVERY rate-limited issue at UTC midnight
+      # and then capped only issues CREATED that day. A thirty-issue
+      # flood on Monday therefore yielded three on Monday and all
+      # twenty-seven on Tuesday: the cap deferred the flood by a day
+      # instead of capping it, which is not what §1 and §8 promise.
+      #
+      # So count what has actually entered triage today, whenever the
+      # issue was filed: an issue carrying a triaged-state label whose
+      # updatedAt is today. A comment today also bumps updatedAt, so
+      # the count can overshoot; it errs towards releasing less, which
+      # is the safe direction for a flood guard.
+      ALL_ISSUES=$(gh issue list --state all --limit 300 \
+        --json number,author,createdAt,updatedAt,labels,state)
+
+      SPENT_TODAY=$(echo "$ALL_ISSUES" | jq --arg today "$TODAY_UTC" --arg owner "$OWNER" \
+        --argjson triaged "$TRIAGED_LABELS_JSON" '
+          [ .[]
+            | select(.author.login != $owner)
+            | select((.updatedAt | split("T")[0]) == $today)
+            | select([.labels[].name] | any(. as $n | $triaged | index($n)))
+          ]
+          | group_by(.author.login)
+          | map({key: .[0].author.login, value: length})
+          | from_entries
+        ')
+
+      # ── Step 2: Release only what today's remaining budget allows ─
+      # Candidates are every OPEN rate-limited issue plus every OPEN
+      # unlabelled issue, oldest first. Each author may see at most
+      # DAILY_CAP - spent of them released this cycle; the rest keep
+      # (or gain) factory:rate-limited and wait.
+      CANDIDATES=$(echo "$ALL_ISSUES" | jq --arg owner "$OWNER" --argjson state "$STATE_LABELS_JSON" '
+          [ .[]
+            | select(.state == "OPEN")
+            | select(.author.login != $owner)
+            | select(
+                ([.labels[].name] | any(. == "factory:rate-limited"))
+                or ([.labels[].name] | any(. as $n | $state | index($n)) | not)
+              )
+          ]
+          | sort_by(.createdAt)
+        ')
+
+      echo "$CANDIDATES" | jq -r --argjson cap "$DAILY_CAP" --argjson spent "$SPENT_TODAY" '
         group_by(.author.login)
-        | map(select(length > $cap))
-        | .[]
-        | sort_by(.createdAt)
-        | .[$cap:]
-        | .[] | .number
-      ' | while read -r num; do
-        if [ -n "$num" ]; then
-          HAS=$(gh issue view "$num" --json labels --jq '[.labels[].name] | any(. == "factory:rate-limited")' 2>/dev/null || echo "false")
+        | map(
+            (($spent[.[0].author.login] // 0)) as $used
+            | (([$cap - $used, 0] | max)) as $budget
+            | {release: .[0:$budget], hold: .[$budget:]}
+          )
+        | map((.release[] | "RELEASE \(.number)"), (.hold[] | "HOLD \(.number)"))
+        | flatten | .[]
+      ' | while read -r action num; do
+        [ -n "${num:-}" ] || continue
+        HAS=$(gh issue view "$num" --json labels --jq '[.labels[].name] | any(. == "factory:rate-limited")' 2>/dev/null || echo "false")
+        if [ "$action" = "RELEASE" ]; then
+          if [ "$HAS" = "true" ]; then
+            gh issue edit "$num" --remove-label "factory:rate-limited" 2>/dev/null || true
+            echo "Released rate-limited issue #$num into today's budget" >&2
+          fi
+        else
+          # Only OPEN issues reach here (filtered above), so the factory
+          # never comments on an issue its author has already withdrawn.
           if [ "$HAS" != "true" ]; then
             gh issue edit "$num" --add-label "factory:rate-limited" 2>/dev/null || true
-            gh issue comment "$num" --body "**Dark Factory triage:** rate-limited. Non-owner accounts are capped at ${DAILY_CAP} issues per UTC calendar day to protect the factory from floods. This issue will be re-evaluated on the next triage cycle after UTC midnight." 2>/dev/null || true
-            echo "Rate-limited issue #$num (author over ${DAILY_CAP}/day cap)" >&2
+            gh issue comment "$num" --body "**Dark Factory triage:** rate-limited. Non-owner accounts are capped at ${DAILY_CAP} issues entering triage per UTC calendar day, to protect the factory from floods. This issue keeps its place in the queue and is re-evaluated on the next cycle that has budget for it." 2>/dev/null || true
+            echo "Rate-limited issue #$num (author's ${DAILY_CAP}/day budget is spent)" >&2
           fi
         fi
       done
@@ -88,14 +141,19 @@ nodes:
       # ════════════════════════════════════════════════════════════
       # Fetch the actual triage batch
       # ════════════════════════════════════════════════════════════
-      # Open issues with NO factory:* label (which excludes anything
-      # we just rate-limited). Cap at 10, truncate bodies to ~2KB.
+      # Open issues that hold no STATE label (which excludes anything
+      # we just rate-limited, and everything already in the machine).
+      # A marker label such as factory:from-comprehensive-test is not
+      # a state and must not hide an issue: that is how the weekly
+      # regression run's findings reach the queue at all.
+      # Cap at 10, truncate bodies to ~2KB.
       gh issue list \
         --state open \
         --limit 30 \
         --json number,title,body,author,createdAt,labels \
-        --search "-label:factory:triaging -label:factory:accepted -label:factory:rejected -label:factory:needs-human -label:factory:in-progress -label:factory:rate-limited" \
-        | jq '[.[] | select(([.labels[].name] | any(startswith("factory:"))) | not)] | .[0:10] | map(.body = (.body // "" | .[0:2000]))'
+        --search "$SEARCH_EXCLUSIONS" \
+        | jq --argjson state "$STATE_LABELS_JSON" \
+            '[.[] | select([.labels[].name] | any(. as $n | $state | index($n)) | not)] | .[0:10] | map(.body = (.body // "" | .[0:2000]))'
     timeout: 60000
 
   - id: fetch-rules
@@ -106,6 +164,14 @@ nodes:
       echo ""
       echo "=== FACTORY_RULES.md ==="
       cat FACTORY_RULES.md
+      echo ""
+      # §12: "Ask a given decision once." The rule says a product question
+      # already answered here must be cited rather than escalated again,
+      # and until now the log had no reader: four escalations were spent on
+      # one question. The classifier needs it in front of it to obey §1's
+      # "open PRD question, unless decisions.md records the answer".
+      echo "=== .factory/decisions.md ==="
+      cat .factory/decisions.md
     timeout: 10000
 
   - id: fetch-open-prs
@@ -165,6 +231,14 @@ nodes:
         echo ""
         echo "--- Issue #$num: $verdict ($priority, $classification) ---"
 
+        # An issue that was rejected and then reopened by its filer is back
+        # in the queue (fetch-issues no longer hides it). Clear the stale
+        # verdict before recording the new one, or the issue carries two
+        # contradictory answers and the next cycle cannot tell which is live.
+        if gh issue view "$num" --json labels --jq '[.labels[].name] | any(. == "factory:rejected")' 2>/dev/null | grep -q true; then
+          gh issue edit "$num" --remove-label "factory:rejected" 2>/dev/null || true
+        fi
+
         case "$verdict" in
           accept)
             body="**Dark Factory triage:** accepted"$'\n\n'"${reason}"$'\n\n'"_Priority: ${priority} | Type: ${classification}_"
@@ -210,6 +284,23 @@ nodes:
             gh issue comment "$num" --body "$body"
             gh issue edit "$num" --add-label "factory:rejected"
             gh issue close "$num" --reason "not planned"
+            ;;
+
+          needs_human)
+            # The third verdict. FACTORY_RULES §1 lists seven categories the
+            # factory must defer rather than decide -- a new secret, anything
+            # touching persistence or the cap, CI and infrastructure, an open
+            # PRD question with no answer in .factory/decisions.md, anything
+            # security-sensitive -- and §7 requires escalation. Until now
+            # triage had two verdicts, so every one of those issues was
+            # CLOSED with a rejection instead of being handed over. The issue
+            # stays open: a human is the next actor, not the filer.
+            body="**Dark Factory triage:** needs a human"$'\n\n'"${reason}"$'\n\n'"_This is outside what the factory decides for itself (FACTORY_RULES §1). It stays open and waits for the repository owner. Nothing is being worked on in the meantime._"
+            gh issue edit "$num" \
+              --add-label "factory:needs-human" \
+              --add-label "priority:$priority" \
+              --add-label "type:$classification"
+            gh issue comment "$num" --body "$body"
             ;;
 
           *)

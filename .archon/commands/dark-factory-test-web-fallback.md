@@ -39,13 +39,16 @@ Do NOT read source code.
 ## Steps
 
 1. Confirm `GET $BASE/api/health` reports `"status":"ok"`. Save the body
-   to `$ARTIFACTS_DIR/test-rag-response-health.txt` and note the
-   `web_search` field (`configured` is expected under the harness stubs).
+   to `$ARTIFACTS_DIR/test-web-fallback-health.txt` and note the
+   `web_search` field. Under the harness stubs this is the provider name the
+   stub stack was started with -- `perplexity` by default, `brave` when
+   `serve.py --web brave` was used. It is NEVER the string `configured`; the
+   only value meaning "no web fallback at all" is `none`.
 2. Open a fresh session: `POST $BASE/api/sessions` with
    `{"client_id":"weekly-scenario-3"}` (no hint); assert `201` and capture
    `session_id` and `session_token`.
 3. Send the uncovered German question with the bearer token and save the
-   SSE body to `$ARTIFACTS_DIR/test-rag-response-turn.txt`. Wait up to 60s
+   SSE body to `$ARTIFACTS_DIR/test-web-fallback-turn.txt`. Wait up to 60s
    for `data: [DONE]`.
 4. Verify in the saved stream:
    (a) status `200`;
@@ -58,10 +61,10 @@ Do NOT read source code.
    (e) at least one `event: sentence` frame, with `"language": "de"`,
        before the `turn` frame (the answer is spoken in German).
 5. Read the transcript (`GET $BASE/api/sessions/$SESSION_ID` with the
-   bearer token), save it to `$ARTIFACTS_DIR/test-rag-response-transcript.txt`,
+   bearer token), save it to `$ARTIFACTS_DIR/test-web-fallback-transcript.txt`,
    and verify the last agent turn records `"source": "web"`.
 6. `DELETE $BASE/api/sessions/$SESSION_ID` with the bearer token.
-7. Write a markdown summary to `$ARTIFACTS_DIR/test-rag-response.md`
+7. Write a markdown summary to `$ARTIFACTS_DIR/test-web-fallback.md`
    including the detected language, the sentence text, the URLs listed in
    `sources`, and the evidence paths.
 
@@ -72,8 +75,8 @@ Do NOT read source code.
 FAIL if any of:
 - Response is an error or the stream never reaches `data: [DONE]`
 - The `turn` source is `wiki` (the wiki does not cover the question - a
-  wiki answer here is an invented one) or `none` while `web_search` is
-  `configured`
+  wiki answer here is an invented one) or `none` while `web_search` names a
+  real provider (`perplexity` or `brave`)
 - The `sources` array is empty or any entry lacks `kind: "web"` or a `url`
 - The `language` event or the `turn` is not `de`
 

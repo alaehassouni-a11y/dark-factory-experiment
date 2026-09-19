@@ -1,7 +1,7 @@
 name: dark-factory-comprehensive-test
 description: |
   Use when: Weekly cron fires a full end-to-end regression against `main` of
-            the dark-factory-experiment repo. NOT triggered by the 4-hour
+            the dark-factory-experiment repo. NOT triggered by the 30-minute
             orchestrator - runs on its own separate schedule.
   Triggers: Weekly cron (0 6 * * 1 UTC), or manual "run comprehensive test".
   Does: Checks out main -> starts the Virtual Agent service on a dynamic
@@ -42,7 +42,9 @@ description: |
 
   `harness/serve.py` starts the service against `harness/fixtures/wiki`
   (opening hours in English and French, a returns policy) and stub
-  providers (a deterministic OpenAI-shaped model, a Brave-shaped search).
+  providers (a deterministic OpenAI-shaped model, plus BOTH web-search
+  shapes: a Perplexity/Sonar-style research completion, which is the
+  production default, and a Brave-style search endpoint).
   The wiki-coverage scenario asks about opening hours and expects source
   `wiki`; the web-fallback scenario asks something the wiki cannot answer
   ("Wer hat die Mona Lisa gemalt?") and expects source `web`. Do NOT
@@ -111,6 +113,12 @@ nodes:
       export PATH="$HOME/.local/bin:$PATH"
       echo "=== Backend deps (uv sync) ==="
       (cd app/backend && uv sync --all-extras 2>&1 | tail -10)
+      echo "=== Wiki import tool deps (uv sync) ==="
+      # tools/wiki is a second uv project and the static and unit rungs lint
+      # and test it too. Its ruff and pytest live in its `dev` extra, which a
+      # bare `uv run` never installs: on a fresh worktree that made rung 1
+      # fail with "Failed to spawn: ruff" and misrouted every PR.
+      (cd tools/wiki && uv sync --all-extras 2>&1 | tail -10)
     depends_on: [pull-latest]
     idle_timeout: 300000
 
@@ -121,7 +129,8 @@ nodes:
 
       # `harness/serve.py` is the ONLY way the factory starts the service for
       # validation. It boots stub providers (an OpenAI-shaped model and a
-      # Brave-shaped search) on a free port, points the service at them and
+      # a web-search stub in both the Sonar and Brave shapes) on a free port,
+      # points the service at them and
       # at `harness/fixtures/wiki` through the same environment variables
       # production uses, then runs uvicorn as a child that dies with it. No
       # secrets, no network, no env file: the whole journey in docs/API.md
@@ -192,8 +201,9 @@ nodes:
   #   - writes $ARTIFACTS_DIR/test-<name>.md as human-readable evidence
   #   - saves at least one raw response body under $ARTIFACTS_DIR/test-<name>-*.txt
 
-  - id: test-chat-ui
-    command: dark-factory-test-chat-ui
+  - id: test-session-greeting
+    command: dark-factory-test-session-greeting
+    allowed_tools: [Bash]
     depends_on: [start-app]
     context: fresh
     idle_timeout: 300000
@@ -206,9 +216,10 @@ nodes:
         failure_reason: { type: ["string", "null"] }
       required: [status, summary, evidence, failure_reason]
 
-  - id: test-video-ingestion
-    command: dark-factory-test-video-ingestion
-    depends_on: [test-chat-ui]
+  - id: test-wiki-coverage
+    command: dark-factory-test-wiki-coverage
+    allowed_tools: [Bash]
+    depends_on: [test-session-greeting]
     context: fresh
     idle_timeout: 600000
     output_format:
@@ -220,9 +231,10 @@ nodes:
         failure_reason: { type: ["string", "null"] }
       required: [status, summary, evidence, failure_reason]
 
-  - id: test-rag-response
-    command: dark-factory-test-rag-response
-    depends_on: [test-video-ingestion]
+  - id: test-web-fallback
+    command: dark-factory-test-web-fallback
+    allowed_tools: [Bash]
+    depends_on: [test-wiki-coverage]
     context: fresh
     idle_timeout: 300000
     output_format:
@@ -234,9 +246,10 @@ nodes:
         failure_reason: { type: ["string", "null"] }
       required: [status, summary, evidence, failure_reason]
 
-  - id: test-conversation-history
-    command: dark-factory-test-conversation-history
-    depends_on: [test-rag-response]
+  - id: test-language-privacy
+    command: dark-factory-test-language-privacy
+    allowed_tools: [Bash]
+    depends_on: [test-web-fallback]
     context: fresh
     idle_timeout: 300000
     output_format:
@@ -261,12 +274,30 @@ nodes:
         # providers down with it, so one kill tears down the whole stack.
         kill "$BACKEND_PID" 2>/dev/null && echo "killed backend PID $BACKEND_PID" || echo "backend already dead"
       fi
+
+      # Did anything modify the checkout? The scenarios are a black box that
+      # drives a running service with curl; they have no business editing the
+      # fixture wiki, the service, or their own evidence. If a scenario saw a
+      # failing assertion and "fixed" it, the report would describe a run that
+      # was not against main, and file-issues would file nothing. That is the
+      # "suggestion with good manners" failure FACTORY.md names, so the marker
+      # below is a precondition for filing anything.
+      # pull-latest can leave untracked artefacts, so ignore untracked files
+      # and compare only tracked content against the branch under test.
+      DIRTY=$(git status --porcelain --untracked-files=no 2>/dev/null)
+      if [ -n "$DIRTY" ]; then
+        echo "WORKTREE_DIRTY"
+        echo "$DIRTY"
+      else
+        echo "WORKTREE_CLEAN"
+      fi
+
       echo "TEARDOWN_COMPLETE"
     depends_on:
-      - test-chat-ui
-      - test-video-ingestion
-      - test-rag-response
-      - test-conversation-history
+      - test-session-greeting
+      - test-wiki-coverage
+      - test-web-fallback
+      - test-language-privacy
     trigger_rule: all_done
     timeout: 30000
 
@@ -276,6 +307,7 @@ nodes:
 
   - id: report
     command: dark-factory-comprehensive-report
+    allowed_tools: [Read, Glob]
     depends_on: [teardown]
     context: fresh
     idle_timeout: 180000
@@ -287,6 +319,15 @@ nodes:
       REPORT="$ARTIFACTS_DIR/comprehensive-test-report.md"
       if [ ! -f "$REPORT" ]; then
         echo "ERROR: report file missing at $REPORT" >&2
+        exit 1
+      fi
+
+      # Evidence integrity. teardown asserts the checkout is unchanged; if a
+      # scenario edited the fixture wiki, the service or its own evidence,
+      # this run did not measure main and nothing it "found" can be filed.
+      if ! echo "$teardown.output" | grep -q "WORKTREE_CLEAN"; then
+        echo "WORKTREE_NOT_PROVEN_CLEAN: refusing to file issues from a run that modified the checkout." >&2
+        echo "$teardown.output" | grep -A20 "WORKTREE_DIRTY" >&2 || true
         exit 1
       fi
 
@@ -364,26 +405,60 @@ nodes:
         BODY=$(echo "$failure" | jq -r '.body')
         SCENARIO=$(echo "$failure" | jq -r '.scenario')
 
-        # Dedup: search open issues with the same title already labeled
-        # factory:from-comprehensive-test. If one exists, skip creating a
-        # duplicate - the existing issue will continue through the triage
-        # pipeline on its own.
+        # Dedup on the SCENARIO, not on the title.
+        #
+        # This used to search GitHub for the report agent's title, which the
+        # synthesizer rewrites from scratch every week. Two ways to be wrong,
+        # and it was both: the same regression worded differently was filed
+        # again, and GitHub's ANDed token search plus `.[0]` collapsed two
+        # genuinely different failures into one with no trace. The scenario id
+        # is deterministic, so it is the key. It is stamped into the title so
+        # a human can see it, and matched client-side so search tokenisation
+        # cannot surprise us.
+        TAG="[comprehensive-test:${SCENARIO}]"
+        FULL_TITLE="${TAG} ${TITLE}"
+
         EXISTING=$(gh issue list \
           --state open \
           --label "factory:from-comprehensive-test" \
-          --search "$TITLE in:title" \
+          --limit 100 \
           --json number,title \
-          --jq '.[0].number // empty')
+          --jq --arg tag "$TAG" 'map(select(.title | startswith($tag))) | .[0].number // empty' \
+          2>/dev/null || echo "")
 
         if [ -n "$EXISTING" ]; then
-          echo "Skipping duplicate of #$EXISTING for scenario=$SCENARIO"
+          # A repeat, not a duplicate to be silently dropped. Say so on the
+          # issue: a regression failing two weeks running is a different fact
+          # from one that failed once, and FACTORY_RULES 4 and 7 want the
+          # second one escalated rather than quietly re-observed.
           NUMBER="$EXISTING"
-          ACTION="deduped"
+          ACTION="repeat"
+          REPEATS=$(gh issue view "$NUMBER" --json comments \
+            --jq '[.comments[] | select(.body | startswith("**Dark Factory comprehensive test:** failed again"))] | length' \
+            2>/dev/null || echo 0)
+          REPEAT_BODY=$(printf '%s\n\n%s\n' \
+            "**Dark Factory comprehensive test:** failed again on $(date -u '+%Y-%m-%d')." \
+            "Scenario \`${SCENARIO}\` is still red. Latest evidence: ${TITLE}")
+          gh issue comment "$NUMBER" --body "$REPEAT_BODY" 2>/dev/null || true
+          if [ "${REPEATS:-0}" -ge 1 ]; then
+            gh issue edit "$NUMBER" --add-label "factory:needs-human" 2>/dev/null || true
+            ESC_BODY=$(printf '%s\n\n%s\n' \
+              "**Dark Factory:** escalating." \
+              "Scenario \`${SCENARIO}\` has now failed on three consecutive weekly runs and the factory has not fixed it. Labelled factory:needs-human per FACTORY_RULES section 7; remove the label to hand it back.")
+            gh issue comment "$NUMBER" --body "$ESC_BODY" 2>/dev/null || true
+            echo "Escalated #$NUMBER for scenario=$SCENARIO (repeat #$((REPEATS + 1)))"
+            ACTION="escalated"
+          else
+            echo "Commented repeat on #$NUMBER for scenario=$SCENARIO"
+          fi
         else
+          # priority:high, which FACTORY_RULES 4 requires and which this node
+          # never applied: a regression found on main outranks a feature.
           NUMBER=$(gh issue create \
-            --title "$TITLE" \
+            --title "$FULL_TITLE" \
             --body  "$BODY" \
             --label "bug" \
+            --label "priority:high" \
             --label "factory:from-comprehensive-test" \
             | awk -F/ '{print $NF}')
           echo "Filed issue #$NUMBER for scenario=$SCENARIO"

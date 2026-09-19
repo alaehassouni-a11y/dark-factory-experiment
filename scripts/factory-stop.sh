@@ -34,7 +34,22 @@ repo_from_origin() {
     | sed -E 's#^(git@github\.com:|ssh://git@github\.com/|https://github\.com/)##; s#/$##; s#\.git$##'
 }
 REPO="${FACTORY_REPO:-$(repo_from_origin)}"
-KILL_FILE="${FACTORY_KILL_FILE:-${FACTORY_WORKDIR:-.}/.factory-stop}"
+
+# Where the kill file lives by default. This used to be "$PWD/.factory-stop", which was
+# a real hole: the repository above is found from this script's own directory precisely
+# so the check works from any cwd, but the local half then looked somewhere else. The
+# documented invocation is an absolute path with no cd, cron's cwd is $HOME, and every
+# workflow node runs inside its own worktree - so `touch .factory-stop` at the repository
+# root, which is what every document tells you to do, was invisible to all three.
+#
+# Resolved against the same root as the repository lookup. `--show-toplevel` on a
+# worktree gives that worktree's root, so a run inside one can still be stopped by
+# placing the file there; FACTORY_WORKDIR and FACTORY_KILL_FILE still override.
+factory_root() {
+  git -C "${FACTORY_WORKDIR:-$(dirname "${BASH_SOURCE[0]}")}" rev-parse --show-toplevel 2>/dev/null \
+    || echo "${FACTORY_WORKDIR:-$(dirname "${BASH_SOURCE[0]}")/..}"
+}
+KILL_FILE="${FACTORY_KILL_FILE:-$(factory_root)/.factory-stop}"
 STOP_LABEL="factory:stop"
 
 if [ -z "$REPO" ]; then
