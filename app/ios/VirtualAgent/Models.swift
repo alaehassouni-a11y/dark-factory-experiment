@@ -3,12 +3,16 @@ import Foundation
 // Wire types for docs/API.md. Property names are camelCase; the coders built in
 // `AgentAPI.makeCoders()` translate to and from the service's snake_case keys.
 
-/// The four supported languages (MISSION hard invariant 1) and the voice locale
-/// API.md's `GET /api/languages` assigns to each.
+/// The four supported language codes (MISSION hard invariant 1).
+///
+/// The name and the voice locale of each are the service's to define: the app reads them
+/// from `GET /api/languages` into a `LanguageTable` (CLAUDE.md: the app never maps a
+/// language to a locale itself). The two values below are the stand-in for the moments
+/// before that answer arrives, and for a device with no service to ask.
 enum SupportedLanguage: String, CaseIterable {
     case ar, de, en, fr
 
-    var name: String {
+    var fallbackName: String {
         switch self {
         case .ar: return "Arabic"
         case .de: return "German"
@@ -17,7 +21,7 @@ enum SupportedLanguage: String, CaseIterable {
         }
     }
 
-    var voiceLocale: String {
+    var fallbackVoiceLocale: String {
         switch self {
         case .ar: return "ar-SA"
         case .de: return "de-DE"
@@ -110,8 +114,6 @@ enum TurnKind: String, Decodable, Equatable {
     init(from decoder: Decoder) throws {
         self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
     }
-
-    var label: String { rawValue.replacingOccurrences(of: "_", with: " ") }
 }
 
 enum TurnSource: String, Decodable, Equatable {
@@ -123,8 +125,6 @@ enum TurnSource: String, Decodable, Equatable {
     init(from decoder: Decoder) throws {
         self = Self(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .unknown
     }
-
-    var label: String { rawValue }
 }
 
 enum SourceKind: String, Decodable, Equatable {

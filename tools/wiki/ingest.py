@@ -10,8 +10,9 @@ HTML, plain text and Markdown are understood; anything else is reported and skip
 
 THE KNOWLEDGE FORMAT, which is what the service indexes best (see the wiki README):
 
-    <!-- imported from: brochure.pdf on 2026-09-06 by tools/wiki/ingest.py -->
     # One topic, as a title
+
+    <!-- imported from: brochure.pdf on 2026-09-06 by tools/wiki/ingest.py -->
 
     A few short paragraphs of plain facts under the title.
 
@@ -21,6 +22,11 @@ THE KNOWLEDGE FORMAT, which is what the service indexes best (see the wiki READM
 One file per topic. A source with several top-level headings is split into one file per
 heading (`--no-split` keeps it whole). The title becomes the file name and is what the agent
 cites as its source, so the first heading matters more than anything else in the document.
+A title with no Latin letters (an Arabic one, say) cannot become a file name on its own: the
+source file name and a short digest of the title are used instead, so that every topic still
+lands in its own file. The provenance comment sits under the title, not above it: the service
+indexes the text before the first heading as a section of its own, and a comment alone there
+would become a chunk of pure noise.
 
 What this tool does NOT do: it never touches the running service (the folder is watched;
 a file written here is knowledge within seconds), it never deletes anything, and it never
@@ -31,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import itertools
 import re
 import sys
@@ -87,9 +94,22 @@ def to_markdown(path: Path) -> str:
 
 
 def slugify(text: str) -> str:
+    """A file-name slug, or "" when the text has no Latin letters or digits at all."""
     ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
     slug = re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")
-    return slug[:80] or "document"
+    return slug[:80]
+
+
+def file_stem(title: str, source: str) -> str:
+    """The file name for a topic: its title, or - when the title slugifies to nothing, which
+    is what an Arabic title does - the source file name with a short digest of the title, or
+    that digest alone. Two different titles never meet in the same name."""
+    slug = slugify(title)
+    if slug:
+        return slug
+    digest = hashlib.sha1(title.encode("utf-8")).hexdigest()[:8]
+    from_source = slugify(Path(source).stem)
+    return f"{from_source}-{digest}" if from_source else digest
 
 
 def title_from_filename(path: Path) -> str:
@@ -181,9 +201,17 @@ def import_file(path: Path, split: bool = True, today: dt.date | None = None) ->
         body = clean(body)
         if not body.lstrip().startswith("# "):
             body = f"# {title}\n\n{body}"
-        header = f"<!-- imported from: {path.name} on {stamp} by tools/wiki/ingest.py -->\n"
-        docs.append(Document(title=title, body=header + body, source=path.name))
+        header = f"<!-- imported from: {path.name} on {stamp} by tools/wiki/ingest.py -->"
+        docs.append(Document(title=title, body=_below_title(body, header), source=path.name))
     return docs
+
+
+def _below_title(body: str, header: str) -> str:
+    """The provenance comment goes under the `# title` line, never above it: the service
+    indexes everything before the first heading as a section, so a comment on the first line
+    becomes a chunk that is nothing but the comment."""
+    title_line, _, rest = body.lstrip("\n").partition("\n")
+    return f"{title_line}\n\n{header}\n\n{rest.lstrip()}".rstrip("\n") + "\n"
 
 
 # ------------------------------------------------------------------ CLI
@@ -219,6 +247,7 @@ def main(argv: list[str] | None = None) -> int:
         ns.out.mkdir(parents=True, exist_ok=True)
 
     written = skipped = failed = 0
+    claimed: dict[Path, str] = {}  # target -> the title that claimed it, this run
     for src in _sources(ns.sources):
         if src.suffix.lower() not in SUPPORTED:
             print(f"  skip    {src}  (unsupported: {src.suffix or 'no extension'})")
@@ -239,11 +268,22 @@ def main(argv: list[str] | None = None) -> int:
             skipped += 1
             continue
         for doc in docs:
-            target = ns.out / f"{slugify(doc.title)}.md"
+            target = ns.out / f"{file_stem(doc.title, doc.source)}.md"
             words = len(doc.body.split())
             note = f'"{doc.title}"  {words} words, {doc.sections} sections'
             if words > 1500:
                 note += "  <- long for one topic; consider splitting"
+            if target in claimed:
+                # Two topics of this run want one file. Writing would silently lose one of
+                # them, so this one is not written and both titles are named.
+                print(
+                    f"  CLASH   {target}  ({note}; not written: "
+                    f'"{claimed[target]}" claimed this name earlier in the run '
+                    f"- rename one of the two titles)"
+                )
+                failed += 1
+                continue
+            claimed[target] = doc.title
             if target.exists() and not ns.force and not ns.dry_run:
                 print(f"  exists  {target}  ({note}; use --force to overwrite)")
                 skipped += 1

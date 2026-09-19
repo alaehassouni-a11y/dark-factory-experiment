@@ -49,7 +49,7 @@ final class SpeechOutput: NSObject, ObservableObject {
         let chosen = Self.best(of: exact)
             ?? Self.best(of: sameLanguage)
             ?? AVSpeechSynthesisVoice(language: localeIdentifier)
-            ?? AVSpeechSynthesisVoice(language: SupportedLanguage.en.voiceLocale)
+            ?? AVSpeechSynthesisVoice(language: LanguageTable.defaultVoiceLocale)
         if let chosen {
             voices[localeIdentifier] = chosen
         }

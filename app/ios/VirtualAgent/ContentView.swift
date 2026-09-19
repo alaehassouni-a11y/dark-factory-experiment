@@ -25,7 +25,7 @@ struct ContentView: View {
                     } label: {
                         Image(systemName: "gearshape")
                     }
-                    .accessibilityLabel("Settings")
+                    .accessibilityLabel(model.phrase(.settings))
                 }
             }
             .sheet(isPresented: $showSettings) { SettingsSheet(model: model) }
@@ -41,7 +41,7 @@ struct ContentView: View {
     private var transcript: some View {
         ScrollView {
             LazyVStack(spacing: 12) {
-                ForEach(model.messages) { MessageBubble(message: $0) }
+                ForEach(model.messages) { MessageBubble(message: $0, language: model.currentLanguage) }
             }
             .padding()
         }
@@ -59,7 +59,7 @@ struct ContentView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .background(Capsule().fill(Color.accentColor.opacity(0.15)))
-        .accessibilityLabel("Language: \(model.languageName ?? "not detected yet")")
+        .accessibilityLabel(model.phrase(.language(name: model.languageName ?? model.phrase(.languageNotDetected))))
     }
 
     private var statusArea: some View {
@@ -102,7 +102,7 @@ struct ContentView: View {
                 Image(systemName: "arrow.up.circle.fill").font(.title2)
             }
             .disabled(!canSend)
-            .accessibilityLabel("Send")
+            .accessibilityLabel(model.phrase(.send))
         }
         .padding(.horizontal)
         .padding(.vertical, 8)
@@ -130,13 +130,15 @@ struct ContentView: View {
         }
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.5)
-        .accessibilityLabel(listening ? "Stop listening" : "Speak")
+        .accessibilityLabel(model.phrase(listening ? .stopListening : .speak))
         .padding(.bottom, 16)
     }
 }
 
 private struct MessageBubble: View {
     let message: TranscriptMessage
+    /// The session language, so the two words under the answer are in it too.
+    let language: String?
 
     var body: some View {
         HStack {
@@ -187,7 +189,7 @@ private struct MessageBubble: View {
 
     private var turnLabel: String? {
         guard let kind = message.kind, let source = message.source else { return nil }
-        return "\(kind.label) · \(source.label)"
+        return "\(kind.phrase.text(in: language)) · \(source.phrase.text(in: language))"
     }
 }
 
@@ -200,24 +202,24 @@ private struct SettingsSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Service URL") {
+                Section(model.phrase(.serviceURL)) {
                     TextField(SessionViewModel.defaultServiceURL, text: $url)
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                 }
                 Section {
-                    Button("New session") {
+                    Button(model.phrase(.newSession)) {
                         model.applyServiceURL(url, restart: true)
                         dismiss()
                     }
                 }
             }
-            .navigationTitle("Settings")
+            .navigationTitle(model.phrase(.settings))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
+                    Button(model.phrase(.done)) {
                         model.applyServiceURL(url)
                         dismiss()
                     }

@@ -172,7 +172,7 @@ final class SpeechInput {
 
     private static func recognizer(for locale: Locale) -> SFSpeechRecognizer? {
         SFSpeechRecognizer(locale: locale)
-            ?? SFSpeechRecognizer(locale: Locale(identifier: SupportedLanguage.en.voiceLocale))
+            ?? SFSpeechRecognizer(locale: Locale(identifier: LanguageTable.defaultVoiceLocale))
             ?? SFSpeechRecognizer()
     }
 }

@@ -1,0 +1,3 @@
+/* Die beiden Berechtigungsabfragen, die ersten Worte, die die App zeigt. */
+"NSMicrophoneUsageDescription" = "Virtual Agent hört Ihre Frage, um sie laut beantworten zu können.";
+"NSSpeechRecognitionUsageDescription" = "Virtual Agent wandelt Ihre Worte in Text um, der an den Agenten gesendet wird.";

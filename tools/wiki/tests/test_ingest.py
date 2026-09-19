@@ -16,8 +16,9 @@ def test_markdown_with_one_title_is_kept_whole(tmp_path: Path) -> None:
     docs = ingest.import_file(src, today=TODAY)
     assert [d.title for d in docs] == ["Opening hours"]
     assert docs[0].body.startswith(
-        "<!-- imported from: hours.md on 2026-09-06 by tools/wiki/ingest.py -->\n# Opening hours\n"
-    )
+        "# Opening hours\n\n"
+        "<!-- imported from: hours.md on 2026-09-06 by tools/wiki/ingest.py -->\n"
+    ), "the provenance comment follows the title; above it the service indexes it alone"
     assert docs[0].sections == 1
 
 
@@ -49,9 +50,8 @@ def test_plain_text_without_headings_gets_a_title_from_the_filename(tmp_path: Pa
     docs = ingest.import_file(src, today=TODAY)
     assert docs[0].title == "Delivery times"
     body = docs[0].body
-    assert (
-        "# Delivery times\n\nWe deliver within two working days.\n\nExpress is next day.\n" in body
-    )
+    assert body.startswith("# Delivery times\n\n<!-- imported from: delivery_times.txt")
+    assert "We deliver within two working days.\n\nExpress is next day.\n" in body
     assert "\r" not in body and "\n\n\n" not in body
 
 
@@ -78,7 +78,43 @@ def test_html_goes_through_the_converter(tmp_path: Path) -> None:
 def test_slugify_is_ascii_and_stable() -> None:
     assert ingest.slugify("Horaires d'ouverture") == "horaires-d-ouverture"
     assert ingest.slugify("Öffnungszeiten & Lieferung") == "offnungszeiten-lieferung"
-    assert ingest.slugify("ساعات العمل") == "document"
+    assert ingest.slugify("ساعات العمل") == "", "nothing ASCII to make a name from"
+
+
+def test_two_arabic_titles_reach_two_distinct_files(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    src = tmp_path / "in" / "faq.md"
+    src.parent.mkdir()
+    src.write_text(
+        "# ساعات العمل\n\nمن التاسعة إلى السادسة.\n\n# أوقات التسليم\n\nيومان.\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "wiki"
+    assert ingest.main([str(src), "--out", str(out)]) == 0
+    written = sorted(p.name for p in out.glob("*.md"))
+    assert len(written) == 2, f"one file per Arabic topic, got {written}"
+    assert len(set(written)) == 2
+    assert all(p.startswith("faq-") for p in written), written
+    bodies = [p.read_text(encoding="utf-8") for p in out.glob("*.md")]
+    assert any("ساعات العمل" in b for b in bodies)
+    assert any("أوقات التسليم" in b for b in bodies)
+    assert "IMPORT_DONE written=2" in capsys.readouterr().out
+
+
+def test_two_topics_that_want_one_file_are_reported_and_not_overwritten(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    src = tmp_path / "in" / "faq.md"
+    src.parent.mkdir()
+    src.write_text("# Delivery\n\nTwo days.\n\n# Delivery\n\nThree days.\n", encoding="utf-8")
+    out = tmp_path / "wiki"
+    assert ingest.main([str(src), "--out", str(out)]) == 1, "a clash fails the run"
+    printed = capsys.readouterr().out
+    assert "CLASH" in printed and "not written" in printed
+    assert (out / "delivery.md").read_text(encoding="utf-8").count("Two days.") == 1
+    assert "Three days." not in (out / "delivery.md").read_text(encoding="utf-8")
+    assert "IMPORT_DONE written=1 skipped=0 failed=1" in printed
 
 
 def test_cli_writes_files_and_refuses_to_overwrite(
@@ -92,7 +128,7 @@ def test_cli_writes_files_and_refuses_to_overwrite(
     assert (
         (out / "opening-hours.md")
         .read_text(encoding="utf-8")
-        .startswith("<!-- imported from: hours.md")
+        .startswith("# Opening hours\n\n<!-- imported from: hours.md")
     )
     assert "IMPORT_DONE written=1" in capsys.readouterr().out
 
