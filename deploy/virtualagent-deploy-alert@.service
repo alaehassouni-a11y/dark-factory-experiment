@@ -1,0 +1,32 @@
+# Started by systemd when virtualagent-deploy.service fails (OnFailure=), with
+# the failed unit's name as the instance (%i).
+#
+# It runs /opt/virtualagent/alert.sh, which is NOT in this repository: an alert
+# is host-specific and usually holds a credential (an SMTP login, a webhook
+# URL, a chat token), and nothing with a credential in it goes in git. Write it
+# on the host, `chmod 700`, and have it do whatever reaches a human — the
+# simplest useful version is one line:
+#
+#     #!/bin/sh
+#     mail -s "virtualagent deploy failed" ops@example.com
+#
+# It receives the last 50 journal lines of the failed unit on stdin and the
+# unit name as $1.
+#
+# If that file does not exist, this unit does nothing at all (ConditionPathExists
+# below) and the alert is still not lost: virtualagent-deploy.service stays in
+# the failed state, so `systemctl --failed` and `systemctl list-timers` show it,
+# and the deploy log holds the reason.
+
+[Unit]
+Description=Report a failed Virtual Agent deploy (%i)
+ConditionPathExists=/opt/virtualagent/alert.sh
+
+[Service]
+Type=oneshot
+User=virtualagent
+Group=virtualagent
+# Reading another unit's journal needs this group; without it journalctl prints
+# nothing and the alert still fires, just with an empty body.
+SupplementaryGroups=systemd-journal
+ExecStart=/bin/sh -c 'journalctl --unit=%i --lines=50 --no-pager | /opt/virtualagent/alert.sh %i'
