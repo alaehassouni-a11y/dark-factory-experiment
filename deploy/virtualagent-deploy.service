@@ -1,0 +1,49 @@
+# The deploy run itself. Started by virtualagent-deploy.timer; also runnable by
+# hand with `systemctl start virtualagent-deploy.service`.
+#
+# Install: copy this file and the .timer next to it to /etc/systemd/system/,
+# then `systemctl daemon-reload && systemctl enable --now virtualagent-deploy.timer`.
+# They are committed rather than typed on the host so the cadence, the user and
+# the failure handling can be reviewed, and so a new host is reproducible.
+#
+# This unit runs /opt/virtualagent/deploy.sh, which should be the thin wrapper
+# deploy/host-wrapper.sh: it execs the deploy script from inside the checkout,
+# so what runs is always the script from the commit being deployed.
+
+[Unit]
+Description=Virtual Agent blue/green deploy check
+# Nothing here works without the daemon, and a run at boot must wait for it.
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+# THE ALERT. A failed deploy used to be a line in a log file nobody reads;
+# systemd now starts this unit on any non-zero exit, and `systemctl --failed`
+# shows the deploy unit itself as failed until the next success. The script's
+# own VIRTUALAGENT_ALERT_CMD (mail, webhook, gh issue) is the other half; this
+# half needs nothing configured to work.
+OnFailure=virtualagent-deploy-alert@%n.service
+
+[Service]
+Type=oneshot
+# The user that owns /opt/virtualagent and is in the docker group. Change both
+# lines together if the host uses a different account.
+User=virtualagent
+Group=virtualagent
+ExecStart=/opt/virtualagent/deploy.sh
+# Optional second alert channel, on top of OnFailure= above: a command line the
+# script runs on failure with the message as "$1". Uncomment and edit one.
+#Environment="VIRTUALAGENT_ALERT_CMD=mail -s virtualagent-deploy-failed ops@example.com"
+# Optional: never flip automatically on this host — build the new colour, check
+# it, and wait for `/opt/virtualagent/deploy.sh flip`. The same effect without
+# editing this unit is `touch /opt/virtualagent/.hold`.
+#Environment=VIRTUALAGENT_NO_FLIP=1
+# A deploy builds an image, waits for a healthcheck and smoke-tests through the
+# proxy. Generous, but bounded: a hung run must not hold the flock forever and
+# block every later tick.
+TimeoutStartSec=45min
+# The script writes its own log; leave systemd's journal as the second copy.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -38,14 +38,14 @@ policy. Any question about opening hours is wiki-covered.
 ## Steps
 
 1. Fetch `GET $BASE/api/health`, save it to
-   `$ARTIFACTS_DIR/test-video-ingestion-health.txt`, and assert
+   `$ARTIFACTS_DIR/test-wiki-coverage-health.txt`, and assert
    `"status":"ok"` and `wiki_documents >= 1`. A health body with
    `wiki_documents: 0` is a FAIL - the wiki did not load.
 2. Open a session: `POST $BASE/api/sessions` with
    `{"client_id":"weekly-scenario-2","language_hint":"en"}`; assert `201`
    and capture `session_id` and `session_token`.
 3. Send a wiki-covered question and save the SSE body to
-   `$ARTIFACTS_DIR/test-video-ingestion-turn.txt`:
+   `$ARTIFACTS_DIR/test-wiki-coverage-turn.txt`:
    `POST $BASE/api/sessions/$SESSION_ID/turns` with the bearer token and
    body `{"text":"What are your opening hours?"}`. Wait up to 60s for
    `data: [DONE]`.
@@ -59,11 +59,11 @@ policy. Any question about opening hours is wiki-covered.
    (d) at least one `event: sentence` frame before `event: turn`.
 5. Ask the same question in French on the same session
    (`{"text":"Quels sont vos horaires d'ouverture ?"}`), save the stream to
-   `$ARTIFACTS_DIR/test-video-ingestion-turn-fr.txt`, and verify the
+   `$ARTIFACTS_DIR/test-wiki-coverage-turn-fr.txt`, and verify the
    `language` event says `fr`, the `turn` source is still `wiki`, and the
    `sources` entries still carry a `location`.
 6. `DELETE $BASE/api/sessions/$SESSION_ID` with the bearer token.
-7. Write a markdown summary to `$ARTIFACTS_DIR/test-video-ingestion.md`
+7. Write a markdown summary to `$ARTIFACTS_DIR/test-wiki-coverage.md`
    including the health counts (`wiki_documents`, `wiki_chunks`), the
    `sources` locations observed, and the evidence paths.
 

@@ -1,0 +1,4 @@
+/* The two permission prompts, the first words the app ever shows. The product name is
+   not translated; everything around it is. Info.plist holds the English originals. */
+"NSMicrophoneUsageDescription" = "Virtual Agent listens to your question so it can answer you aloud.";
+"NSSpeechRecognitionUsageDescription" = "Virtual Agent turns what you say into text to send to the agent.";

@@ -1,0 +1,79 @@
+# THE PROTECTED PATHS, in one machine-readable place.
+#
+# This file is the canonical list. FACTORY_RULES.md §5 is its prose source:
+# when the two disagree, §5 is what a human meant and this file is what the
+# factory does, so fixing the drift is the first job. CLAUDE.md §"Protected
+# paths", the PR template and the security-check command files all describe
+# the same set in prose for a reader; none of them is read by a machine.
+# This one is: .archon/workflows/dark-factory-validate-pr.yaml's
+# check-protected-paths node matches every changed file in a PR against it
+# and apply-verdict refuses to approve a PR that matched.
+#
+# Format, one glob per line:
+#   glob     hard — a PR that touches this is auto-rejected (FACTORY_RULES §6.1)
+#   ?glob    partial — only part of the file is an invariant, so the reviewers
+#            read the diff instead. Reported as PROTECTED_PARTIAL, never blocking.
+#   !glob    exemption, checked first.
+# `**` and `*` both cross directory separators (the matcher is a shell `case`).
+# Blank lines and lines starting with # are ignored.
+
+# ── Governance: the constitution ──────────────────────────────────────
+MISSION.md
+FACTORY_RULES.md
+CLAUDE.md
+docs/virtualagent.prd.md
+
+# ── The judge: a builder that can edit its checks can pass them ───────
+harness/**
+.factory/**
+scripts/factory-stop.sh
+
+# ── GitHub and the factory's own workflows and prompts ────────────────
+.github/**
+.archon/workflows/**
+.archon/commands/**
+.archon/config.yaml
+
+# ── Infrastructure and deployment: zero downtime depends on it ────────
+deploy/**
+# The build context is the repository root, so THIS is the ignore file
+# Docker actually reads. Get it wrong and a host .venv or a stray .env
+# ships inside the image.
+.dockerignore
+Dockerfile
+**/Dockerfile
+**/Dockerfile.*
+docker-compose*.yml
+**/docker-compose*.yml
+**/*.service
+**/*.timer
+
+# ── Secrets and auth configuration ────────────────────────────────────
+# The committed .env.example templates are documentation, not secrets.
+!**.env.example
+!.env.example
+.env
+.env.*
+**/.env
+**/.env.*
+**/secrets.*
+**/credentials.*
+
+# ── Invariant-bearing code (CLAUDE.md §The Contract That Must Not Regress)
+app/backend/auth.py
+app/backend/rate_limit.py
+app/backend/main.py
+app/backend/config.py
+app/backend/llm/openrouter.py
+app/backend/routes/sessions.py
+
+# Partially protected: the named definitions are the invariant, the rest of
+# the file is an allowed evolution, so these go to the reviewers rather than
+# straight to reject. languages.py — SUPPORTED_LANGUAGES, LANGUAGE_NAMES and
+# VOICE_LOCALES (detection below them may evolve). pipeline.py — the order in
+# Agent.respond() and the source assignment in _compose() (the confidence
+# decision it calls, in wiki/index.py, is an allowed evolution and is listed
+# here only so a reviewer looks at it alongside pipeline.py).
+?app/backend/languages.py
+?app/backend/agent/pipeline.py
+?app/backend/wiki/index.py

@@ -8,9 +8,11 @@ description: |
   Does: Fetches PR + linked issue + base-branch governance -> starts the Virtual Agent
         service on a dynamic port against stub providers -> runs THE GATE
         (harness/ci.py: static, unit, the section 4 journey, the holdout, the mutation
-        set, then harness/ratchet.py against the floors) + static checks + unit
-        tests + four parallel HOLDOUT reviewers (behavioral, API E2E, security, code
-        review) -> synthesizes a verdict, which bash overrides if the gate was red.
+        set, then harness/ratchet.py against the floors) + a deterministic
+        protected-path and PR-size check + four HOLDOUT reviewers (behavioral,
+        API E2E, security, code review) -> synthesizes a verdict, which bash
+        overrides if the gate was red, if the app never started, or if the PR
+        touched a protected path or blew the size cap.
         If request_changes, runs a fresh-context fix pass, then a second full validation
         pass (all reviewers re-run on the updated diff). Always tears down the app,
         then applies the final verdict (approve / request_changes / reject).
@@ -42,12 +44,22 @@ description: |
 
   3. Poison immunity — FACTORY_RULES.md, MISSION.md, CLAUDE.md are fetched from
      `origin/main` BEFORE `gh pr checkout`. A PR cannot weaken its own rulebook.
-     Any diff touching governance files is an automatic REJECT.
+     Any diff touching governance files is an automatic REJECT. The same applies
+     to the judge itself: `checkout-pr` overlays `harness/`, `.factory/`,
+     `scripts/factory-stop.sh`, `.archon/` and `.claude/` from `origin/main`
+     over the PR's worktree, so the gate, the holdout, the mutation set and the
+     ratchet floors that judge a PR are always main's, never the PR's own copy.
+     `check-protected-paths` then rejects the PR for having touched them at all.
 
-  4. Fresh context + empty tool lists on every AI reviewer node. The behavioral
-     static reviewer has `allowed_tools: []`. The E2E reviewer has `[Bash]` (only
-     to drive the running service with curl) and is explicitly forbidden from
-     reading source.
+  4. Fresh context and the narrowest tool list each AI node can do its job with.
+     The behavioral reviewers, the security checks and both synthesizers have
+     `allowed_tools: []` — they work from node outputs alone. The E2E reviewer
+     has `[Bash]` (only to drive the running service with curl) and is
+     explicitly forbidden from reading source. The code reviewers have
+     `[Read, Grep, Glob]`: they must read the tree to review it, but they
+     cannot run commands, and they run only after the gate has finished so the
+     mutation set is not rewriting files under them. No reviewer node has the
+     full tool list.
 
   5. Command-file explicit prohibitions — every AI node loads a .md command file
      whose leading section enumerates what must not be read (plans, commit
@@ -209,6 +221,21 @@ nodes:
 
       gh pr checkout "$PR_NUMBER"
       echo "Checked out PR #$PR_NUMBER on branch $(git branch --show-current)"
+
+      # Pin the commit this run is about to gate. Everything downstream — the
+      # gate, the holdout, the mutation set, the E2E journey — exercises THIS
+      # sha and nothing else, and apply-verdict refuses to merge anything else
+      # (`gh pr merge --match-head-commit`). Without the pin, a push landing
+      # between the gate and the merge ships ungated code under a review that
+      # claims every gate passed.
+      VALIDATED_SHA=$(git rev-parse HEAD)
+      echo "$VALIDATED_SHA" > "$ARTIFACTS_DIR/.validated-sha"
+      REMOTE_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid -q '.headRefOid' 2>/dev/null || echo "")
+      if [ -n "$REMOTE_SHA" ] && [ "$REMOTE_SHA" != "$VALIDATED_SHA" ]; then
+        echo "WARN: worktree HEAD $VALIDATED_SHA != PR head $REMOTE_SHA; pinning the checked-out sha" >&2
+      fi
+      echo "VALIDATED_SHA $VALIDATED_SHA"
+
       # Pull infra-only files from origin/main into the worktree so the
       # validator always uses the latest workflow command files and skills,
       # regardless of how stale the PR branch is. We deliberately do NOT
@@ -216,19 +243,140 @@ nodes:
       # exactly as the author wrote it. Governance was captured into the
       # fetch-base-governance artifact BEFORE this checkout, so the
       # holdout property is preserved either way.
+      #
+      # The overlay covers the JUDGE as well as the prompts: harness/ is the
+      # gate and the mutation set, .factory/ is the holdout and the ratchet
+      # floors, scripts/factory-stop.sh is the stop button. A PR that edits
+      # any of them would otherwise be judged by its own edits, which is the
+      # one thing FACTORY_RULES §5 exists to prevent. harness/mutations/run.py
+      # tolerates a dirty tree outside its own defect files, so overlaying
+      # here does not disturb the mutation rung.
       git fetch origin main --quiet
+      JUDGE_PATHS=".archon/ .claude/ harness/ .factory/ scripts/factory-stop.sh"
       # Discard any local changes in infra dirs before overlaying main's
-      # versions. Without this, `git checkout origin/main -- .archon/`
-      # fails when the worktree was created from a stale commit and the
-      # infra files have been modified since (e.g., we just pushed a
-      # workflow fix to main).
-      git checkout -- .archon/ .claude/ 2>/dev/null || true
-      git checkout origin/main -- .archon/ .claude/ 2>/dev/null || true
-      # Reset any infra path that doesn't exist on main rather than failing.
-      echo "Synced .archon/ and .claude/ from origin/main:"
-      git status --short .archon/ .claude/ | head -20 || true
+      # versions. Without this, restoring from origin/main fails when the
+      # worktree was created from a stale commit and the infra files have
+      # been modified since (e.g., we just pushed a workflow fix to main).
+      git restore --worktree -- $JUDGE_PATHS 2>/dev/null || true
+      # `restore --worktree` (not `git checkout origin/main -- <paths>`) on
+      # purpose: checkout writes the INDEX as well, which leaves main-vs-branch
+      # drift staged. The fixer in Phase 6 would then commit our overlay as if
+      # the PR had edited governance, and pass-2's security check would reject
+      # the PR for a change the validator itself made.
+      git restore --source=origin/main --worktree -- $JUDGE_PATHS 2>/dev/null || true
+      # Belt and braces: whatever git version is on the host, leave the index
+      # matching the PR's own tree for these paths.
+      git reset -q -- $JUDGE_PATHS 2>/dev/null || true
+      echo "Synced the judge and the prompts from origin/main (worktree only):"
+      git status --short $JUDGE_PATHS | head -20 || true
     depends_on: [fetch-pr, verify-holdout-clean, fetch-base-governance]
     timeout: 60000
+
+  # ─────────────────────────────────────────────────────────────────
+  # The two rules a model should never be the only reader of: which
+  # files a PR may not touch, and how big a PR may be. Both are pure
+  # data — a file list and an integer — so both are bash, not prose in
+  # a reviewer's prompt read off a diff that `head -3000` may have
+  # truncated. apply-verdict requires this node's markers exactly the
+  # way it requires APP_STARTED.
+  # ─────────────────────────────────────────────────────────────────
+  - id: check-protected-paths
+    bash: |
+      set +e
+      PR_NUMBER=$(cat "$ARTIFACTS_DIR/.pr-number")
+      LIST=".factory/protected-paths.txt"
+      if [ ! -f "$LIST" ]; then
+        # Fail closed and loudly: no list means no protection.
+        echo "PROTECTED_TOUCHED path=<list-missing:$LIST>"
+        echo "SIZE_EXCEEDED reason=protected-paths-list-missing"
+        exit 0
+      fi
+      # The list is authored on whatever machine a human happened to use, so
+      # strip CR before matching: a trailing \r turns every pattern into one
+      # that matches nothing and this check into a rubber stamp.
+      tr -d '\r' < "$LIST" > "$ARTIFACTS_DIR/.protected-list"
+      LIST="$ARTIFACTS_DIR/.protected-list"
+
+      # `gh pr view --json files` is paginated by the API. Compare the number
+      # of rows we got against the PR's own changedFiles count and refuse to
+      # declare the PR clean if they disagree — a truncated file list would
+      # otherwise read as "nothing protected was touched".
+      META=$(gh pr view "$PR_NUMBER" --json files,changedFiles,additions,deletions 2>/dev/null)
+      if [ -z "$META" ]; then
+        echo "PROTECTED_TOUCHED path=<gh-pr-view-failed>"
+        echo "SIZE_EXCEEDED reason=gh-pr-view-failed"
+        exit 0
+      fi
+      CHANGED_FILES=$(echo "$META" | jq -r '.changedFiles')
+      LISTED=$(echo "$META" | jq -r '.files | length')
+      ADDITIONS=$(echo "$META" | jq -r '.additions')
+      DELETIONS=$(echo "$META" | jq -r '.deletions')
+      echo "$META" | jq -r '.files[].path' > "$ARTIFACTS_DIR/.changed-files"
+
+      if [ "$LISTED" != "$CHANGED_FILES" ]; then
+        echo "PROTECTED_TOUCHED path=<file-list-truncated listed=$LISTED changedFiles=$CHANGED_FILES>"
+        echo "SIZE_EXCEEDED reason=file-list-truncated"
+        exit 0
+      fi
+
+      # The list format, one glob per line:
+      #   plain    a hard match — touching it is an auto-reject
+      #   ?glob    partially protected — only part of the file is an invariant,
+      #            so a reviewer reads the diff; reported, never blocking
+      #   !glob    an exemption, checked first (the committed .env.example
+      #            templates are documentation)
+      # `case` is used for matching, so `**` is normalised to `*`: an unquoted
+      # `*` in a case pattern already crosses `/`.
+      HARD=""
+      PARTIAL=""
+      while IFS= read -r path; do
+        [ -z "$path" ] && continue
+        VERDICT=""
+        while IFS= read -r raw; do
+          case "$raw" in ''|'#'*) continue ;; esac
+          pat="${raw%%[[:space:]]#*}"
+          kind="hard"
+          case "$pat" in
+            '!'*) kind="exempt"; pat="${pat#!}" ;;
+            '?'*) kind="partial"; pat="${pat#\?}" ;;
+          esac
+          pat=$(echo "$pat" | sed 's/\*\*/*/g')
+          case "$path" in
+            $pat)
+              if [ "$kind" = "exempt" ]; then VERDICT="exempt"; break; fi
+              if [ "$kind" = "hard" ]; then VERDICT="hard"; break; fi
+              VERDICT="partial"
+              ;;
+          esac
+        done < "$LIST"
+        case "$VERDICT" in
+          hard)    HARD="$HARD $path" ;;
+          partial) PARTIAL="$PARTIAL $path" ;;
+        esac
+      done < "$ARTIFACTS_DIR/.changed-files"
+
+      for p in $PARTIAL; do
+        echo "PROTECTED_PARTIAL path=$p (invariant-bearing; the reviewers read this diff)"
+      done
+      if [ -n "$HARD" ]; then
+        for p in $HARD; do
+          echo "PROTECTED_TOUCHED path=$p"
+        done
+      else
+        echo "PROTECTED_CLEAN files=$CHANGED_FILES"
+      fi
+
+      TOTAL=$((ADDITIONS + DELETIONS))
+      if [ "$TOTAL" -le 500 ]; then
+        echo "SIZE_OK lines=$TOTAL"
+      else
+        echo "SIZE_EXCEEDED lines=$TOTAL limit=500"
+      fi
+      # Always exit 0: this node reports, apply-verdict decides. A non-zero
+      # exit would skip apply-verdict and leave the PR stuck with no comment.
+      exit 0
+    depends_on: [fetch-pr]
+    timeout: 30000
 
   # ═══════════════════════════════════════════════════════════════
   # PHASE 2: INSTALL DEPS + START THE SERVICE FOR E2E
@@ -236,28 +384,15 @@ nodes:
   # We need the service running before the E2E reviewer can drive it.
   # Dynamic port allocation so parallel workflow runs don't collide.
 
-  - id: allocate-ports
-    bash: |
-      set -euo pipefail
-      # The service is one FastAPI process and its only client is the iOS
-      # app, so nothing on this machine hardcodes its port. Pick a free one
-      # so parallel workflow runs never collide; the E2E reviewer reads it
-      # from the artifact file.
-      find_free_port() {
-        local start=$1 end=$2
-        for port in $(seq $start $end); do
-          if ! (echo >/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
-            echo $port; return 0
-          fi
-        done
-        echo "ERROR: no free port in range $start-$end" >&2; return 1
-      }
-      BACKEND_PORT=$(find_free_port 15100 15999)
-
-      echo "$BACKEND_PORT" > "$ARTIFACTS_DIR/.backend-port"
-      echo "Allocated backend=$BACKEND_PORT"
-    depends_on: [checkout-pr]
-    timeout: 10000
+  # There is deliberately no allocate-ports node any more. A port chosen
+  # minutes before it is bound is a port another run can take in between:
+  # `install-deps` sits between the two and runs 3-5 minutes, and
+  # FACTORY_RULES §8 allows four workflows at once, all scanning the same
+  # range from its lowest port. The second run's health poll would then
+  # succeed against the FIRST run's service and the E2E reviewer would render
+  # a verdict on someone else's code. start-app now picks the port
+  # immediately before it launches, and proves the service answering on it is
+  # the process it started.
 
   - id: install-deps
     bash: |
@@ -265,14 +400,19 @@ nodes:
       export PATH="$HOME/.local/bin:$PATH"
       echo "=== Backend deps (uv sync) ==="
       (cd app/backend && uv sync --all-extras 2>&1 | tail -10)
+      echo "=== Wiki import tool deps (uv sync) ==="
+      # tools/wiki is a second uv project and the static and unit rungs lint
+      # and test it too. Its ruff and pytest live in its `dev` extra, which a
+      # bare `uv run` never installs: on a fresh worktree that made rung 1
+      # fail with "Failed to spawn: ruff" and misrouted every PR.
+      (cd tools/wiki && uv sync --all-extras 2>&1 | tail -10)
       echo ""
-      # Warm the mypy cache. Cold mypy on this backend exceeds the 2-min
-      # bash-node default timeout and SIGTERMs static-checks-backend-p1;
-      # a warm .mypy_cache/ lets the next mypy run complete in seconds.
-      # All DAG nodes in a run share this worktree, so the cache we populate
-      # here is the cache static-checks-backend-p1 (and -p2) will hit.
+      # Warm the mypy cache. Cold mypy on this backend is slow enough to
+      # matter to the gate, whose mutation rung re-runs the static rung once
+      # per defect. All DAG nodes in a run share this worktree, so the cache
+      # we populate here is the cache harness/ci.py will hit.
       # Type errors are non-fatal here — the cache populates regardless,
-      # and the real verdict comes from the dedicated static-checks nodes.
+      # and the real verdict comes from the gate's static rung.
       echo "=== Warming mypy cache ==="
       (cd app/backend && uv run mypy . 2>&1 | tail -3) || true
     depends_on: [checkout-pr]
@@ -295,52 +435,96 @@ nodes:
       # runs against stubs, so this node needs nothing from the VPS. It
       # refuses loudly (APP_START_REFUSED) when `uv` is missing.
       PYTHON=$(command -v python || command -v python3)
-
-      # Normal path: the port comes from allocate-ports via artifacts.
-      # Demo/manual path: if the port file is missing (someone ran this node
-      # in isolation), allocate one the same way and write it so downstream
-      # nodes that read the file still work.
-      if [ -f "$ARTIFACTS_DIR/.backend-port" ]; then
-        BACKEND_PORT=$(cat "$ARTIFACTS_DIR/.backend-port")
-      else
-        find_free_port() {
-          local start=$1 end=$2
-          for port in $(seq $start $end); do
-            if ! (echo >/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
-              echo $port; return 0
-            fi
-          done
-          echo "ERROR: no free port in range $start-$end" >&2; return 1
-        }
-        BACKEND_PORT=$(find_free_port 15100 15999)
-        echo "$BACKEND_PORT" > "$ARTIFACTS_DIR/.backend-port"
-        echo "WARN: .backend-port missing, allocated $BACKEND_PORT" >&2
-      fi
-
       mkdir -p "$ARTIFACTS_DIR/app-logs"
 
-      # Service + stub providers, in the background, logs to artifacts.
-      nohup "$PYTHON" harness/serve.py --port "$BACKEND_PORT" > "$ARTIFACTS_DIR/app-logs/backend.log" 2>&1 &
-      echo $! > "$ARTIFACTS_DIR/.backend-pid"
+      # Pick the port HERE, in the same breath as the bind. A port is only
+      # free until someone else takes it, and up to four validate-pr runs
+      # share this machine.
+      find_free_port() {
+        local start=$1 end=$2
+        for port in $(seq $start $end); do
+          if ! (echo >/dev/tcp/127.0.0.1/$port) 2>/dev/null; then
+            echo $port; return 0
+          fi
+        done
+        echo "ERROR: no free port in range $start-$end" >&2; return 1
+      }
 
-      # Wait for health. The service answers GET /api/health with
-      # {"status":"ok",...} once the wiki has loaded (boot can take a
-      # while on a cold worktree: uv resolves the venv first).
-      echo "Waiting for backend on :$BACKEND_PORT ..."
-      for i in $(seq 1 90); do
-        if curl -sf "http://127.0.0.1:$BACKEND_PORT/api/health" 2>/dev/null | grep -qE '"status": ?"ok"'; then
-          echo "backend up after ${i}s"; break
+      # Randomise the scan start so two runs launching in the same second do
+      # not both settle on 15100.
+      SCAN_FROM=$((15100 + (RANDOM % 800)))
+
+      STARTED="no"
+      for attempt in 1 2 3 4 5; do
+        BACKEND_PORT=$(find_free_port "$SCAN_FROM" 15999)
+        LOG="$ARTIFACTS_DIR/app-logs/backend.log"
+
+        # Service + stub providers, in the background, logs to artifacts.
+        nohup "$PYTHON" harness/serve.py --port "$BACKEND_PORT" > "$LOG" 2>&1 &
+        BACKEND_PID=$!
+        echo "$BACKEND_PID" > "$ARTIFACTS_DIR/.backend-pid"
+        echo "attempt $attempt: serve.py pid=$BACKEND_PID port=$BACKEND_PORT"
+
+        # Wait for health. The service answers GET /api/health with
+        # {"status":"ok",...} once the wiki has loaded (boot can take a
+        # while on a cold worktree: uv resolves the venv first).
+        HEALTHY="no"
+        for i in $(seq 1 90); do
+          if curl -sf "http://127.0.0.1:$BACKEND_PORT/api/health" 2>/dev/null | grep -qE '"status": ?"ok"'; then
+            echo "backend up after ${i}s"; HEALTHY="yes"; break
+          fi
+          # A port that was free a second ago can be taken by a sibling run
+          # between find_free_port and uvicorn's bind. uvicorn says so and
+          # exits; serve.py returns its code, so this node would otherwise
+          # poll a stranger's healthy service for 90s and believe it.
+          if grep -qi 'address already in use' "$LOG" 2>/dev/null; then
+            echo "WARN: port $BACKEND_PORT was taken between allocation and bind; retrying higher" >&2
+            SCAN_FROM=$((BACKEND_PORT + 1))
+            break
+          fi
+          if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+            echo "ERROR: serve.py (pid $BACKEND_PID) exited before the service came up" >&2
+            tail -50 "$LOG" >&2
+            break
+          fi
+          sleep 1
+        done
+
+        if [ "$HEALTHY" != "yes" ]; then
+          kill "$BACKEND_PID" 2>/dev/null || true
+          continue
         fi
-        if [ $i -eq 90 ]; then
-          echo "ERROR: backend failed to start in 90s" >&2
-          tail -50 "$ARTIFACTS_DIR/app-logs/backend.log" >&2
-          exit 1
+
+        # Health alone proves only that SOMETHING answers on this port. These
+        # two lines prove it is ours: our process is still alive, and our own
+        # log says uvicorn finished booting.
+        if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+          echo "ERROR: health answered but pid $BACKEND_PID is gone — that service belongs to another run" >&2
+          SCAN_FROM=$((BACKEND_PORT + 1))
+          continue
         fi
-        sleep 1
+        if ! grep -q 'Application startup complete' "$LOG" 2>/dev/null; then
+          echo "ERROR: health answered but $LOG never logged 'Application startup complete' — that service is not ours" >&2
+          kill "$BACKEND_PID" 2>/dev/null || true
+          SCAN_FROM=$((BACKEND_PORT + 1))
+          continue
+        fi
+
+        STARTED="yes"
+        break
       done
 
-      echo "APP_STARTED backend=$BACKEND_PORT"
-    depends_on: [install-deps, allocate-ports]
+      if [ "$STARTED" != "yes" ]; then
+        echo "ERROR: could not start the service on a port of our own after 5 attempts" >&2
+        tail -50 "$ARTIFACTS_DIR/app-logs/backend.log" >&2
+        exit 1
+      fi
+
+      # Downstream nodes (behavioral-e2e-p1, restart-app-p2) read the port
+      # from here, so write it only once the service is proven ours.
+      echo "$BACKEND_PORT" > "$ARTIFACTS_DIR/.backend-port"
+      echo "APP_STARTED backend=$BACKEND_PORT pid=$(cat "$ARTIFACTS_DIR/.backend-pid")"
+    depends_on: [install-deps, checkout-pr]
     idle_timeout: 180000
 
   # ═══════════════════════════════════════════════════════════════
@@ -363,8 +547,20 @@ nodes:
       PYTHON=$(command -v python || command -v python3)
       "$PYTHON" harness/ci.py > "$ARTIFACTS_DIR/gate.log" 2>&1
       GATE_RC=$?
-      "$PYTHON" harness/ratchet.py "$ARTIFACTS_DIR/gate.log" --base origin/main >> "$ARTIFACTS_DIR/gate.log" 2>&1
-      RATCHET_RC=$?
+      # The ratchet asserts observed counts against the floors in
+      # .factory/locks/floor.json. It can only do that against a log that ends
+      # in GATE_OK; run against a red log it prints RATCHET_FAILED, which the
+      # synthesizer reads as "a floor was lowered" and escalates to a human.
+      # A ruff error is not a lowered floor. Run the ratchet only on a green
+      # gate; otherwise say plainly that it did not run, so the common red
+      # build reaches the fix pass instead of a person.
+      if [ $GATE_RC -eq 0 ]; then
+        "$PYTHON" harness/ratchet.py "$ARTIFACTS_DIR/gate.log" --base origin/main >> "$ARTIFACTS_DIR/gate.log" 2>&1
+        RATCHET_RC=$?
+      else
+        RATCHET_RC=0
+        echo "RATCHET_SKIPPED gate_red" >> "$ARTIFACTS_DIR/gate.log"
+      fi
       grep -E '^(HARNESS_START|STATIC_|UNIT_|APP_STARTED|E2E_|HOLDOUT_|MUTATION|GATE_|RATCHET_|  (ok|CAUGHT|ESCAPED|NOT_INJECTED|RATCHET_FAIL|E2E_FAIL|HOLDOUT_FAIL) )' "$ARTIFACTS_DIR/gate.log"
       if [ $GATE_RC -ne 0 ] || [ $RATCHET_RC -ne 0 ]; then
         echo "--- tail of gate.log ---"
@@ -378,53 +574,17 @@ nodes:
     timeout: 2400000
 
   # ═══════════════════════════════════════════════════════════════
-  # PHASE 3: PASS-1 STATIC CHECKS + UNIT TESTS (deterministic, parallel)
+  # PHASE 3: (no separate static / unit nodes — the gate owns those rungs)
   # ═══════════════════════════════════════════════════════════════
-
-  - id: static-checks-backend-p1
-    bash: |
-      set +e
-      export PATH="$HOME/.local/bin:$PATH"
-      cd app/backend
-      # ${PIPESTATUS[0]} captures the real command's exit, not `tail`'s.
-      # Plain $? after a pipe reads tail's exit (always 0), silently
-      # masking ruff/mypy failures.
-      echo "=== ruff check ==="
-      uv run ruff check . 2>&1 | tail -30
-      RUFF_LINT=${PIPESTATUS[0]}
-      echo ""
-      echo "=== ruff format --check ==="
-      uv run ruff format --check . 2>&1 | tail -30
-      RUFF_FMT=${PIPESTATUS[0]}
-      echo ""
-      echo "=== mypy ==="
-      uv run mypy . 2>&1 | tail -30
-      MYPY=${PIPESTATUS[0]}
-      echo ""
-      echo "RESULT: ruff-lint=$([ $RUFF_LINT -eq 0 ] && echo PASS || echo FAIL) ruff-fmt=$([ $RUFF_FMT -eq 0 ] && echo PASS || echo FAIL) mypy=$([ $MYPY -eq 0 ] && echo PASS || echo FAIL)"
-      [ $RUFF_LINT -eq 0 ] && [ $RUFF_FMT -eq 0 ] && [ $MYPY -eq 0 ]
-    depends_on: [install-deps]
-    # Bash nodes honor `timeout`, not `idle_timeout`. Even with a warm
-    # .mypy_cache from install-deps, ruff + mypy on a fresh worktree
-    # occasionally runs >2 minutes — give it real headroom.
-    timeout: 300000
-
-  - id: run-tests-backend-p1
-    bash: |
-      set +e
-      export PATH="$HOME/.local/bin:$PATH"
-      cd app/backend
-      if [ ! -d "tests" ]; then
-        echo "TEST_RESULT_BACKEND=SKIPPED (no backend/tests directory)"
-        exit 0
-      fi
-      uv run pytest tests -xvs 2>&1 | tail -80
-      echo ""
-      echo "TEST_RESULT_BACKEND=$([ $? -eq 0 ] && echo PASS || echo FAIL)"
-    depends_on: [install-deps]
-    # Bash nodes honor `timeout`, not `idle_timeout`. pytest -xvs against
-    # the real Postgres can exceed 2 min once the suite has >100 tests.
-    timeout: 300000
+  # There used to be a static-checks-backend-p1 and a run-tests-backend-p1
+  # node here, each re-running what rungs 1 and 2 of harness/ci.py already
+  # run — and running them CONCURRENTLY with the gate, whose mutation rung
+  # rewrites rate_limit.py, languages.py, agent/pipeline.py and
+  # routes/sessions.py in place for 15-25 minutes. A duplicate that reads the
+  # same worktree during that window reports defects the judge injected.
+  # The gate's own STATIC_OK and UNIT_PASSED markers are the single source
+  # for both, and they cover static_ios.py, which the duplicates did not.
+  # The synthesizers read those markers out of $gate.output / $gate-p2.output.
 
   # ═══════════════════════════════════════════════════════════════
   # PHASE 4: PASS-1 HOLDOUT REVIEWERS (parallel, fresh context)
@@ -498,7 +658,10 @@ nodes:
 
   - id: security-check-p1
     command: dark-factory-security-check
-    depends_on: [fetch-diff, fetch-base-governance]
+    # fetch-pr carries the PR body. FACTORY_RULES §2 makes the body the only
+    # place a new dependency can be justified, and this node's schema requires
+    # `new_dependencies_justified` — without the body it was guessing.
+    depends_on: [fetch-pr, fetch-diff, fetch-base-governance]
     context: fresh
     allowed_tools: []
     output_format:
@@ -530,10 +693,20 @@ nodes:
         - verdict
         - reasoning
 
+  # The one reviewer that must read the tree, so the one reviewer that must
+  # wait for the gate. harness/mutations/run.py edits four invariant-bearing
+  # files in place and restores them at the end; a reviewer reading
+  # rate_limit.py mid-rung sees DAILY_TURN_CAP = 1000 and reports a critical
+  # breach the judge injected. `depends_on: [gate]` costs wall-clock and buys
+  # a reviewer that reads the PR's code rather than the mutation set's.
+  # Read-only tools only: it reviews, it does not run anything, and it has no
+  # business in git history, $ARTIFACTS_DIR, harness/ or .factory/.
   - id: code-review-p1
     command: archon-code-review-agent
-    depends_on: [checkout-pr]
+    depends_on: [gate]
+    trigger_rule: all_done
     context: fresh
+    allowed_tools: [Read, Grep, Glob]
 
   # ═══════════════════════════════════════════════════════════════
   # PHASE 5: SYNTHESIZE PASS-1 VERDICT
@@ -552,8 +725,7 @@ nodes:
       - checkout-pr
       - start-app
       - gate
-      - static-checks-backend-p1
-      - run-tests-backend-p1
+      - check-protected-paths
       - behavioral-validation-p1
       - behavioral-e2e-p1
       - security-check-p1
@@ -632,6 +804,20 @@ nodes:
       # Pull the latest — the fixer just pushed.
       git fetch origin "refs/pull/$PR_NUMBER/head" --quiet 2>/dev/null || true
       git pull --ff-only 2>/dev/null || true
+
+      # Re-pin: pass 2 gates the fixer's commit, so THAT is the sha
+      # apply-verdict is allowed to merge. And assert the remote agrees — if
+      # GitHub's head is not what we are about to validate, something else
+      # pushed to the branch and pass 2 would be reviewing stale code.
+      VALIDATED_SHA=$(git rev-parse HEAD)
+      REMOTE_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid -q '.headRefOid')
+      if [ "$REMOTE_SHA" != "$VALIDATED_SHA" ]; then
+        echo "ERROR: worktree HEAD $VALIDATED_SHA != PR head $REMOTE_SHA — the fixer did not push, or someone else did. Pass 2 would validate stale code." >&2
+        exit 1
+      fi
+      echo "$VALIDATED_SHA" > "$ARTIFACTS_DIR/.validated-sha"
+      echo "VALIDATED_SHA $VALIDATED_SHA"
+
       gh pr diff "$PR_NUMBER" | head -3000
     depends_on: [fix-issues]
     timeout: 30000
@@ -649,20 +835,40 @@ nodes:
       fi
       PYTHON=$(command -v python || command -v python3)
       BACKEND_PORT=$(cat "$ARTIFACTS_DIR/.backend-port")
-      nohup "$PYTHON" harness/serve.py --port "$BACKEND_PORT" > "$ARTIFACTS_DIR/app-logs/backend-p2.log" 2>&1 &
-      echo $! > "$ARTIFACTS_DIR/.backend-pid"
+      LOG="$ARTIFACTS_DIR/app-logs/backend-p2.log"
+      nohup "$PYTHON" harness/serve.py --port "$BACKEND_PORT" > "$LOG" 2>&1 &
+      BACKEND_PID=$!
+      echo "$BACKEND_PID" > "$ARTIFACTS_DIR/.backend-pid"
+      HEALTHY="no"
       for i in $(seq 1 90); do
         if curl -sf "http://127.0.0.1:$BACKEND_PORT/api/health" 2>/dev/null | grep -qE '"status": ?"ok"'; then
-          echo "backend up after ${i}s"; break
+          echo "backend up after ${i}s"; HEALTHY="yes"; break
         fi
-        if [ $i -eq 90 ]; then
-          echo "ERROR: backend failed to restart in 90s" >&2
-          tail -50 "$ARTIFACTS_DIR/app-logs/backend-p2.log" >&2
+        if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+          echo "ERROR: serve.py (pid $BACKEND_PID) exited before the service came up" >&2
+          tail -50 "$LOG" >&2
           exit 1
         fi
         sleep 1
       done
-      echo "APP_RESTARTED backend=$BACKEND_PORT"
+      if [ "$HEALTHY" != "yes" ]; then
+        echo "ERROR: backend failed to restart in 90s" >&2
+        tail -50 "$LOG" >&2
+        exit 1
+      fi
+      # Same proof as start-app: health alone says only that something answers
+      # on this port. Our pid alive plus our own log saying uvicorn finished
+      # booting says it is ours — a sibling run that grabbed the port while
+      # the pass-1 process was dying would otherwise be judged as this PR.
+      if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+        echo "ERROR: health answered but pid $BACKEND_PID is gone — that service belongs to another run" >&2
+        exit 1
+      fi
+      if ! grep -q 'Application startup complete' "$LOG" 2>/dev/null; then
+        echo "ERROR: health answered but $LOG never logged 'Application startup complete' — that service is not ours" >&2
+        exit 1
+      fi
+      echo "APP_RESTARTED backend=$BACKEND_PORT pid=$BACKEND_PID"
     depends_on: [fix-issues]
     timeout: 180000
 
@@ -674,8 +880,16 @@ nodes:
       PYTHON=$(command -v python || command -v python3)
       "$PYTHON" harness/ci.py > "$ARTIFACTS_DIR/gate-p2.log" 2>&1
       GATE_RC=$?
-      "$PYTHON" harness/ratchet.py "$ARTIFACTS_DIR/gate-p2.log" --base origin/main >> "$ARTIFACTS_DIR/gate-p2.log" 2>&1
-      RATCHET_RC=$?
+      # Same reasoning as the pass-1 gate: the ratchet only means anything
+      # against a log that ended in GATE_OK. A red gate gets RATCHET_SKIPPED,
+      # not RATCHET_FAILED, so the fix pass is reachable for lint and unit.
+      if [ $GATE_RC -eq 0 ]; then
+        "$PYTHON" harness/ratchet.py "$ARTIFACTS_DIR/gate-p2.log" --base origin/main >> "$ARTIFACTS_DIR/gate-p2.log" 2>&1
+        RATCHET_RC=$?
+      else
+        RATCHET_RC=0
+        echo "RATCHET_SKIPPED gate_red" >> "$ARTIFACTS_DIR/gate-p2.log"
+      fi
       grep -E '^(HARNESS_START|STATIC_|UNIT_|APP_STARTED|E2E_|HOLDOUT_|MUTATION|GATE_|RATCHET_|  (ok|CAUGHT|ESCAPED|NOT_INJECTED|RATCHET_FAIL|E2E_FAIL|HOLDOUT_FAIL) )' "$ARTIFACTS_DIR/gate-p2.log"
       if [ $GATE_RC -ne 0 ] || [ $RATCHET_RC -ne 0 ]; then
         echo "--- tail of gate-p2.log ---"
@@ -686,46 +900,10 @@ nodes:
     depends_on: [fix-issues]
     timeout: 2400000
 
-  - id: static-checks-backend-p2
-    bash: |
-      set +e
-      export PATH="$HOME/.local/bin:$PATH"
-      cd app/backend
-      # ${PIPESTATUS[0]} captures the real command's exit, not `tail`'s.
-      # Plain $? after a pipe reads tail's exit (always 0), silently
-      # masking ruff/mypy failures.
-      echo "=== ruff check ==="
-      uv run ruff check . 2>&1 | tail -30; RUFF_LINT=${PIPESTATUS[0]}
-      echo ""
-      echo "=== ruff format --check ==="
-      uv run ruff format --check . 2>&1 | tail -30; RUFF_FMT=${PIPESTATUS[0]}
-      echo ""
-      echo "=== mypy ==="
-      uv run mypy . 2>&1 | tail -30; MYPY=${PIPESTATUS[0]}
-      echo ""
-      echo "RESULT: ruff-lint=$([ $RUFF_LINT -eq 0 ] && echo PASS || echo FAIL) ruff-fmt=$([ $RUFF_FMT -eq 0 ] && echo PASS || echo FAIL) mypy=$([ $MYPY -eq 0 ] && echo PASS || echo FAIL)"
-      [ $RUFF_LINT -eq 0 ] && [ $RUFF_FMT -eq 0 ] && [ $MYPY -eq 0 ]
-    depends_on: [fix-issues]
-    # Bash nodes honor `timeout`, not `idle_timeout`. The mypy cache from
-    # install-deps is already warm; p2 runs after fix-issues pushed code,
-    # so most changed modules need re-checking but most of the tree is
-    # cached. 5 min is generous headroom.
-    timeout: 300000
-
-  - id: run-tests-backend-p2
-    bash: |
-      set +e
-      export PATH="$HOME/.local/bin:$PATH"
-      cd app/backend
-      if [ ! -d "tests" ]; then
-        echo "TEST_RESULT_BACKEND=SKIPPED"; exit 0
-      fi
-      uv run pytest tests -xvs 2>&1 | tail -80
-      echo ""
-      echo "TEST_RESULT_BACKEND=$([ $? -eq 0 ] && echo PASS || echo FAIL)"
-    depends_on: [fix-issues]
-    # Bash nodes honor `timeout`, not `idle_timeout`.
-    timeout: 300000
+  # static-checks-backend-p2 and run-tests-backend-p2 are gone for the same
+  # reason their pass-1 twins are: gate-p2 runs ruff, mypy, static_ios and
+  # pytest as rungs 1 and 2, and running them again beside its mutation rung
+  # reads files the mutation runner is holding open.
 
   - id: behavioral-validation-p2
     command: dark-factory-behavioral-validation-p2
@@ -791,7 +969,8 @@ nodes:
 
   - id: security-check-p2
     command: dark-factory-security-check-p2
-    depends_on: [fix-issues, fetch-diff-p2, fetch-base-governance]
+    # fetch-pr for the PR body — see the pass-1 node.
+    depends_on: [fix-issues, fetch-pr, fetch-diff-p2, fetch-base-governance]
     context: fresh
     allowed_tools: []
     output_format:
@@ -823,10 +1002,18 @@ nodes:
         - verdict
         - reasoning
 
+  # Same serialisation as pass 1: behind gate-p2, not beside it.
   - id: code-review-p2
     command: archon-code-review-agent
-    depends_on: [fix-issues]
+    depends_on: [fix-issues, gate-p2]
+    # all_done so a red gate-p2 still gets reviewed (the reviewer's findings
+    # are what the fix list is built from); `when` so the node is still
+    # skipped outright when pass 1 never asked for a fix, exactly as the
+    # other -p2 nodes are.
+    trigger_rule: all_done
+    when: "$synthesize-verdict-pass-1.output.verdict == 'request_changes'"
     context: fresh
+    allowed_tools: [Read, Grep, Glob]
 
   - id: synthesize-verdict-pass-2
     command: dark-factory-synthesize-verdict-p2
@@ -839,8 +1026,7 @@ nodes:
     depends_on:
       - restart-app-p2
       - gate-p2
-      - static-checks-backend-p2
-      - run-tests-backend-p2
+      - check-protected-paths
       - behavioral-validation-p2
       - behavioral-e2e-p2
       - security-check-p2
@@ -1046,6 +1232,42 @@ nodes:
       fi
       # ──────────────────────────────────────────────────────────────────
 
+      # ──────────────────────────────────────────────────────────────────
+      # THE PROTECTED-PATH AND SIZE BACKSTOP - same shape, two more markers.
+      # ──────────────────────────────────────────────────────────────────
+      # FACTORY_RULES §5 (protected files) and §8 (500 lines) were, until
+      # this node existed, enforced only by a model reading a diff that
+      # `head -3000` may have truncated, against a list copied into five
+      # files that had drifted apart. check-protected-paths reads the PR's
+      # file list from the API and matches it against .factory/protected-paths.txt,
+      # the one machine-readable copy. Absent markers mean the check did not
+      # run, which is treated exactly like a violation: no approve without a
+      # positive PROTECTED_CLEAN and SIZE_OK.
+      cat > "$ARTIFACTS_DIR/.protected-output" <<'__PROTECTED_OUTPUT_EOF__'
+      $check-protected-paths.output
+      __PROTECTED_OUTPUT_EOF__
+      if grep -q "PROTECTED_CLEAN" "$ARTIFACTS_DIR/.protected-output" && \
+         grep -q "SIZE_OK" "$ARTIFACTS_DIR/.protected-output"; then
+        SCOPE_CLEAN="true"
+      else
+        SCOPE_CLEAN="false"
+      fi
+      TOUCHED=$(grep -oE 'PROTECTED_TOUCHED path=[^ ]+' "$ARTIFACTS_DIR/.protected-output" | sed 's/^PROTECTED_TOUCHED path=//' | paste -sd ' ' - 2>/dev/null || echo "")
+      SIZE_LINE=$(grep -oE 'SIZE_(OK|EXCEEDED)[^ ]*.*' "$ARTIFACTS_DIR/.protected-output" | head -1 || echo "(no size marker)")
+      echo "SCOPE_BACKSTOP: scope_clean=$SCOPE_CLEAN touched='$TOUCHED' size='$SIZE_LINE' decision=$DECISION"
+
+      if [ "$DECISION" = "approve" ] && [ "$SCOPE_CLEAN" != "true" ]; then
+        echo "SCOPE_BACKSTOP_OVERRIDE: check-protected-paths did not report both PROTECTED_CLEAN and SIZE_OK but the synthesizer rendered approve - overriding to reject+escalate." >&2
+        DECISION="reject"
+        SHOULD_ESCALATE="true"
+        ESCALATION_REASON="Deterministic scope backstop fired: the PR touched a path in .factory/protected-paths.txt (${TOUCHED:-none listed}), exceeded the 500-line cap (${SIZE_LINE}), or the check itself could not run. FACTORY_RULES §5 makes a protected-path change human-authored by definition and §7 escalates the issue with it, because a factory PR reaching for those files means the scope was misunderstood."
+        SUMMARY="Scope backstop override: FACTORY_RULES §5 (protected files) or §8 (500-line cap) was not satisfied, so auto-approve is blocked regardless of what the reviewers concluded."
+        ISSUES=$(printf '%s\n' \
+          "- **critical** [scope]: the PR changed a protected path or exceeded the size cap - ${TOUCHED:-see check-protected-paths output}; ${SIZE_LINE}." \
+          "- **critical** [scope]: synthesize-verdict rendered approve despite it - review why check-protected-paths' markers were not weighed.")
+      fi
+      # ──────────────────────────────────────────────────────────────────
+
       # GitHub forbids reviewing your own PR (addPullRequestReview GraphQL error).
       # When the bot identity authored the PR, fall back to posting a regular
       # comment so the verdict is still visible. Labels and merge actions still
@@ -1110,8 +1332,23 @@ nodes:
           # apply-verdict (set -e) before the label swap runs. Repos with
           # "Automatically delete head branches" enabled handle deletion
           # server-side anyway.
-          if gh pr merge "$PR_NUMBER" --squash; then
-            echo "PR #$PR_NUMBER: merged via squash"
+          # Merge the commit that was actually gated, or nothing.
+          # Between checkout-pr and here sit a 40-minute gate and possibly a
+          # fix pass; a push in that window (the fixer, the builder's own
+          # post-label self-fix, a human) would otherwise land ungated code
+          # under a review claiming every gate passed. `--match-head-commit`
+          # makes GitHub refuse the merge if the head moved; the explicit
+          # comparison first turns that into a readable message instead of a
+          # bare API error.
+          VALIDATED_SHA=$(cat "$ARTIFACTS_DIR/.validated-sha" 2>/dev/null || echo "")
+          CURRENT_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid -q '.headRefOid' 2>/dev/null || echo "")
+          if [ -z "$VALIDATED_SHA" ]; then
+            echo "WARN: no .validated-sha recorded — refusing to merge PR #$PR_NUMBER; leaving approved for manual merge" >&2
+          elif [ "$VALIDATED_SHA" != "$CURRENT_SHA" ]; then
+            echo "WARN: PR #$PR_NUMBER head moved since validation (gated $VALIDATED_SHA, now $CURRENT_SHA) — refusing to merge unvalidated code" >&2
+            gh pr comment "$PR_NUMBER" --body "**Dark Factory Validation**: approved ${VALIDATED_SHA}, but the branch head is now ${CURRENT_SHA}. The merge was refused: only the commit the gate exercised may land. Re-run validation on the new head." 2>/dev/null || true
+          elif gh pr merge "$PR_NUMBER" --squash --match-head-commit "$VALIDATED_SHA"; then
+            echo "PR #$PR_NUMBER: merged via squash at $VALIDATED_SHA"
           else
             echo "WARN: squash merge failed for PR #$PR_NUMBER — leaving approved for manual merge" >&2
           fi
@@ -1225,5 +1462,9 @@ nodes:
           exit 1
           ;;
       esac
-    depends_on: [teardown-app]
+    # check-protected-paths is listed so its markers are substitutable here.
+    # It always exits 0 by design, so it can never skip this node and leave
+    # a PR labelled factory:needs-review with no verdict.
+    depends_on: [teardown-app, check-protected-paths]
+    trigger_rule: all_done
     timeout: 30000

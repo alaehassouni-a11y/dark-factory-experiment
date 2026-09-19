@@ -158,7 +158,10 @@ def scenario_the_wiki_is_asked_first_and_the_web_only_when_it_has_nothing() -> N
                             "Monday to Saturday. We are closed on Sunday.\n",
         "returns.md": "# Returns\n\nReturns are accepted within thirty days with a receipt.\n",
     })
-    llm = FakeLLM("We are open nine to six, Monday to Saturday.")
+    # Three sentences, streamed word by word by the fake: the reply is long enough that
+    # "sentences arrive while the model is still talking" is observable rather than
+    # true by construction. See the liveness assertions below.
+    llm = FakeLLM("We are open nine to six. Monday to Saturday. We close on Sunday.")
     search = SpySearch(results=[WebResult(title="Cup", url="https://example.org/cup",
                                           snippet="France won the 1998 World Cup.")])
     index = asyncio.run(WikiIndex.build(wiki, llm))
@@ -171,6 +174,26 @@ def scenario_the_wiki_is_asked_first_and_the_web_only_when_it_has_nothing() -> N
            t is not None and t.source == "wiki", f"turn={t}")
     expect("the web was NOT searched while the wiki had a confident answer",
            search.queries == [], f"queries={search.queries}")
+
+    # --- the adjective the requirement uses is "live" --------------------------------
+    # The app speaks each sentence as it completes. "A sentence event exists" and "a
+    # sentence event precedes the turn event" are both true of an agent that buffers the
+    # whole reply and emits every sentence at the end - that agent is mute until the last
+    # token and the product it makes is not the product the PRD describes. The only
+    # observable difference is POSITION IN THE STREAM: with the model still streaming,
+    # a sentence must already have been handed over.
+    from backend.agent.events import SentenceEvent, TokenEvent
+
+    first_sentence = next((i for i, e in enumerate(covered) if isinstance(e, SentenceEvent)), -1)
+    last_token = max((i for i, e in enumerate(covered) if isinstance(e, TokenEvent)), default=-1)
+    expect("a sentence is emitted before the last token of the reply arrives",
+           first_sentence >= 0 and last_token >= 0 and first_sentence < last_token,
+           f"first sentence at {first_sentence}, last token at {last_token} of "
+           f"{[type(e).__name__ for e in covered]}")
+    indexes = [e.index for e in covered if isinstance(e, SentenceEvent)]
+    expect("every sentence of the reply is handed over, numbered contiguously from zero",
+           len(indexes) >= 2 and indexes == list(range(len(indexes))),
+           f"sentence indexes={indexes}")
 
     uncovered = asyncio.run(_collect(agent, Session.new(client_id="c1"),
                                      "Who won the football world cup in 1998?"))
@@ -245,10 +268,11 @@ def scenario_every_session_route_is_guarded_and_tokens_do_not_cross() -> None:
     then composed: two sessions, one token used on the other's transcript."""
     import httpx
 
+    from backend.auth import get_current_session
     from backend.main import app
 
     def walk(entries, prefix: str = ""):
-        """Every route the app will actually serve, (path, methods, dependency count).
+        """Every route the app will actually serve, (path, methods, dependency calls).
 
         FastAPI 0.141+ keeps an included router NESTED - an `_IncludedRouter` carrying
         `original_router` and the include prefix - instead of flattening its routes
@@ -267,8 +291,9 @@ def scenario_every_session_route_is_guarded_and_tokens_do_not_cross() -> None:
             if not path.startswith("/api"):
                 continue
             dep = getattr(r, "dependant", None)
-            yield (path, frozenset(getattr(r, "methods", None) or []),
-                   len(dep.dependencies) if dep is not None else -1)
+            calls = None if dep is None else frozenset(
+                d.call for d in dep.dependencies if d.call is not None)
+            yield (path, frozenset(getattr(r, "methods", None) or []), calls)
 
     routes = list(walk(app.routes))
     expect("the app actually assembled some API routes", len(routes) >= 6,
@@ -278,27 +303,69 @@ def scenario_every_session_route_is_guarded_and_tokens_do_not_cross() -> None:
     # brand-new unguarded /api/sessions/{id}/export existed.
     public_allowed = {("/api/health", "GET"), ("/api/version", "GET"),
                       ("/api/languages", "GET"), ("/api/sessions", "POST")}
-    unguarded = sorted({(p, m) for p, ms, n in routes for m in ms
-                        if n == 0 and m != "HEAD" and (p, m) not in public_allowed})
+    unguarded = sorted({(p, m) for p, ms, calls in routes for m in ms
+                        if calls is not None and not calls and m != "HEAD"
+                        and (p, m) not in public_allowed})
     expect("no API route outside the known-public set is dependency-free", not unguarded,
            f"unguarded={unguarded}")
 
-    async def cross() -> tuple[int, int, int]:
+    # "Has at least one dependency" is not the invariant. A route whose guard was swapped
+    # for a store lookup, or for a lookalike that 401s anonymous callers and then waves
+    # any valid token through, still has dependencies. The invariant is that THE guard -
+    # this object, the one `backend.auth` exports and `harness` cannot edit - is on every
+    # route scoped to a session. Asserted by identity, so a same-named replacement fails.
+    session_scoped = sorted({(p, m) for p, ms, calls in routes for m in ms
+                             if p.startswith("/api/sessions/{session_id}") and m != "HEAD"})
+    expect("the session-scoped surface is the three routes docs/API.md describes",
+           len(session_scoped) >= 3,
+           f"session-scoped routes={session_scoped}")
+    ungoverned = sorted({(p, m) for p, ms, calls in routes for m in ms
+                         if p.startswith("/api/sessions/{session_id}") and m != "HEAD"
+                         and (calls is None or get_current_session not in calls)})
+    expect("every session-scoped route depends on backend.auth.get_current_session itself",
+           not ungoverned, f"without the real guard: {ungoverned}")
+
+    async def cross() -> dict[str, int]:
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://holdout") as c:
             a = (await c.post("/api/sessions", json={"client_id": "A"})).json()
             b = (await c.post("/api/sessions", json={"client_id": "B"})).json()
-            own = await c.get(f"/api/sessions/{a['session_id']}",
-                              headers={"Authorization": f"Bearer {a['session_token']}"})
-            other = await c.get(f"/api/sessions/{a['session_id']}",
-                                headers={"Authorization": f"Bearer {b['session_token']}"})
-            anon = await c.get(f"/api/sessions/{a['session_id']}")
-            return own.status_code, other.status_code, anon.status_code
+            sid = a["session_id"]
+            mine = {"Authorization": f"Bearer {a['session_token']}"}
+            theirs = {"Authorization": f"Bearer {b['session_token']}"}
+            body = {"text": "Bonjour, quels sont vos horaires d'ouverture ?"}
+            out = {
+                "read_own": (await c.get(f"/api/sessions/{sid}", headers=mine)).status_code,
+                "read_other": (await c.get(f"/api/sessions/{sid}", headers=theirs)).status_code,
+                "read_anon": (await c.get(f"/api/sessions/{sid}")).status_code,
+                "turn_other": (await c.post(f"/api/sessions/{sid}/turns", json=body,
+                                            headers=theirs)).status_code,
+                "turn_anon": (await c.post(f"/api/sessions/{sid}/turns",
+                                           json=body)).status_code,
+                "delete_other": (await c.delete(f"/api/sessions/{sid}",
+                                                headers=theirs)).status_code,
+                "delete_anon": (await c.delete(f"/api/sessions/{sid}")).status_code,
+            }
+            # The rejected DELETEs must have rejected the DELETE, not just the response.
+            out["still_there"] = (await c.get(f"/api/sessions/{sid}",
+                                              headers=mine)).status_code
+            return out
 
-    own, other, anon = asyncio.run(cross())
-    expect("the owner can read its own session", own == 200, f"got {own}")
-    expect("another session's token cannot read it", other == 403, f"got {other}")
-    expect("no token cannot read it", anon == 401, f"got {anon}")
+    r = asyncio.run(cross())
+    expect("the owner can read its own session", r["read_own"] == 200, f"got {r['read_own']}")
+    expect("another session's token cannot read it", r["read_other"] == 403,
+           f"got {r['read_other']}")
+    expect("no token cannot read it", r["read_anon"] == 401, f"got {r['read_anon']}")
+    # Reading is half of invariant 4. CONTINUING someone else's conversation - burning
+    # their cap, writing into their transcript - and ending it are the other half.
+    expect("another session's token cannot speak on it", r["turn_other"] == 403,
+           f"got {r['turn_other']}")
+    expect("no token cannot speak on it", r["turn_anon"] == 401, f"got {r['turn_anon']}")
+    expect("another session's token cannot delete it", r["delete_other"] == 403,
+           f"got {r['delete_other']}")
+    expect("no token cannot delete it", r["delete_anon"] == 401, f"got {r['delete_anon']}")
+    expect("and after those refusals the session is still the owner's to read",
+           r["still_there"] == 200, f"got {r['still_there']}")
 
 
 # ---------------------------------------------------------------------------
@@ -354,12 +421,81 @@ def scenario_every_turn_declares_a_source_from_the_closed_set() -> None:
                t is not None and t.kind in {"answer", "question", "no_answer"}, f"turn={t}")
 
 
+# ---------------------------------------------------------------------------
+def scenario_openrouter_is_the_only_inference_provider() -> None:
+    """MISSION hard invariant 6, and the half of it no unit test is positioned to see.
+
+    A test of the client proves the client works against whatever it was pointed at. The
+    invariant is about the SHAPE OF THE TREE: one provider, reached through one module,
+    with the models that the rest of the product was tuned against. WIKI_MIN_SIMILARITY
+    was measured with text-embedding-3-small; swap the embedding model and that number,
+    and the confidence decision built on it, quietly mean nothing.
+
+    The defaults are read from the SOURCE, not from the running config: this process, the
+    harness and production all override the base URL, so the runtime value answers "what
+    is this run pointed at", which is a different question from "what does the product
+    ship pointed at"."""
+    from urllib.parse import urlsplit
+
+    from backend import config
+
+    expect("the embedding model is the one the retrieval tuning was measured with",
+           config.EMBEDDING_MODEL == "openai/text-embedding-3-small",
+           f"EMBEDDING_MODEL={config.EMBEDDING_MODEL!r}")
+    expect("the web fallback's research step runs on perplexity/sonar, through OpenRouter",
+           config.WEB_SEARCH_MODEL == "perplexity/sonar",
+           f"WEB_SEARCH_MODEL={config.WEB_SEARCH_MODEL!r}")
+
+    source = (BACKEND / "config.py").read_text(encoding="utf-8")
+
+    def declared_default(name: str) -> str | None:
+        m = re.search(
+            rf'{name}\s*:\s*str\s*=\s*os\.environ\.get\(\s*"{name}"\s*,\s*"([^"]*)"\s*\)',
+            source)
+        return m.group(1) if m else None
+
+    chat_default = declared_default("CHAT_MODEL")
+    expect("with no CHAT_MODEL override the product ships on anthropic/claude-sonnet-4.6",
+           chat_default == "anthropic/claude-sonnet-4.6"
+           and (os.environ.get("CHAT_MODEL") is not None or config.CHAT_MODEL == chat_default),
+           f"declared default={chat_default!r}, runtime={config.CHAT_MODEL!r}")
+
+    base_default = declared_default("OPENROUTER_BASE_URL")
+    expect("the inference endpoint the product ships pointed at is openrouter.ai",
+           base_default is not None and urlsplit(base_default).hostname == "openrouter.ai",
+           f"declared default={base_default!r}")
+
+    # One provider means one door. A second inference SDK anywhere in the service - even
+    # a well-meaning "just for embeddings" - is a provider swap in progress.
+    sdk = re.compile(
+        r"^\s*(?:from|import)\s+(openai|anthropic|cohere|mistralai|groq|replicate|together|"
+        r"google\.generativeai|google\.genai|vertexai|boto3|ollama|llama_cpp|ctransformers|"
+        r"transformers|sentence_transformers|huggingface_hub)\b", re.MULTILINE)
+    openai_importers: list[str] = []
+    other_importers: list[str] = []
+    for py in BACKEND.rglob("*.py"):
+        if {".venv", "tests", "__pycache__"} & set(py.parts):
+            continue
+        rel = str(py.relative_to(BACKEND)).replace("\\", "/")
+        found = set(sdk.findall(py.read_text(encoding="utf-8", errors="replace")))
+        if "openai" in found:
+            openai_importers.append(rel)
+        for name in sorted(found - {"openai"}):
+            other_importers.append(f"{rel}: {name}")
+    expect("the OpenAI-compatible SDK is imported by exactly one module",
+           sorted(openai_importers) == ["llm/openrouter.py"],
+           f"imported by {sorted(openai_importers)}")
+    expect("no second inference SDK is imported anywhere in the service",
+           not other_importers, f"found {sorted(other_importers)}")
+
+
 SCENARIOS = [
     scenario_the_wiki_is_asked_first_and_the_web_only_when_it_has_nothing,
     scenario_the_language_set_is_one_set_and_the_agent_follows_it,
     scenario_every_session_route_is_guarded_and_tokens_do_not_cross,
     scenario_the_cap_is_one_number_and_only_one,
     scenario_every_turn_declares_a_source_from_the_closed_set,
+    scenario_openrouter_is_the_only_inference_provider,
 ]
 
 

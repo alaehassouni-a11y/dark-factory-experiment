@@ -1,20 +1,25 @@
 {
   "_what_this_is": "Every command the gate runs, so harness/ci.py stays the same ladder as every other factory. Each rung is a script in this folder because the product is one Python service plus an iOS client that cannot be compiled on this machine; the scripts say what they do and do not cover.",
 
+  "_python_token": "{python} is substituted with sys.executable - the interpreter running ci.py - the moment this file is loaded. Never write a bare `python` here. One gate means one interpreter: before this token the first rungs ran under whatever `python` PATH resolved to while the holdout and the mutation set ran under sys.executable, so a Windows Store stub or a Debian host without python-is-python3 was reported as a lint failure of the PR rather than as a broken environment.",
+
   "driver": "http",
 
-  "static": "python harness/static.py",
-  "unit": "python harness/unit.py",
+  "static": "{python} harness/static.py",
+  "unit": "{python} harness/unit.py",
   "unit_count_pattern": "UNIT_PASSED tests=(\\d+)",
 
   "http": {
-    "start": "python harness/serve.py --port {port}",
+    "start": "{python} harness/serve.py --port {port}",
     "health_path": "/api/health",
     "health_contains": "\"ok\"",
     "boot_timeout_s": 90
   },
 
   "e2e_timeout_s": 240,
+
+  "_mutations_timeout_s": "The outer cap ci.py puts on the whole mutation set. It must be at least the sum of the inner per-defect budgets in harness/mutations/run.py (8 defects x (180 s quick + 60 s holdout) = 1920 s) or the rung is killed by a cap smaller than the budgets it allows - and a killed child cannot restore the file it mutated, so ci.py restores it instead. Eight defects measure ~90 s in total on a warm cache; the headroom here is for a cold uv/mypy cache in a fresh worktree.",
+  "mutations_timeout_s": 2100,
 
   "_providers": "serve.py starts harness/stubs.py (an OpenAI-shaped chat + embeddings endpoint and a Brave-shaped search endpoint) on a free port and points the service at it, so the whole journey runs with no secrets and no network. The gate therefore proves the PIPELINE, not the providers - see FACTORY.md."
 }

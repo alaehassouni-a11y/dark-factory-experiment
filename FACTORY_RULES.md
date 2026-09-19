@@ -1,6 +1,6 @@
 # Factory Rules
 
-This file governs how the Dark Factory operates on this repository. It is read by every workflow (triage, implementation, validation, fix-PR, comprehensive-test) and by the orchestrator.
+This file governs how the Dark Factory operates on this repository. It is read by every workflow (triage, implementation, validation, comprehensive-test) and by the orchestrator.
 
 **Hierarchy:** `MISSION.md` defines *what* the Virtual Agent is. `CLAUDE.md` defines *how* the code is written. `FACTORY_RULES.md` (this file) defines *how the factory operates safely*. When these three disagree, MISSION.md wins for scope questions, CLAUDE.md wins for code style questions, and FACTORY_RULES.md wins for process questions.
 
@@ -27,7 +27,7 @@ The triage workflow reads MISSION.md, this file, and the open untriaged issues, 
 
 - Anything listed in MISSION.md "Out of Scope (Factory Must Never Build)"
 - Anything that would modify a MISSION.md "Hard Invariant" (see section 10)
-- Questions masquerading as issues ("how do I…", "is it possible to…") - reject with a helpful pointer to where answers live
+- Questions masquerading as issues ("how do I…", "is it possible to…") - reject with a pointer to where answers live, and the pointer is a URL that resolves: `README.md` first, then `MISSION.md` (what the product is), `docs/API.md` (the service contract) and this file (how the factory decides). GitHub Discussions is **off** on this repository, so nothing may point there. The same four destinations are what `.github/ISSUE_TEMPLATE/config.yml` offers a filer before they open an issue at all
 - Feature requests outside stated scope, even popular ones
 - "Rewrite in X" proposals, framework swaps, major architectural changes
 - Duplicates of other open issues (close pointing at the original)
@@ -104,12 +104,31 @@ The validator (`dark-factory-validate-pr`) auto-merges a PR only when **every** 
 9. **Code review finds no critical or high severity issues.** Medium findings can be accepted with rationale; low findings are notes only.
 10. **Protected files untouched** - see section 5.
 11. **PR size within 500 lines.**
-12. **Fix-attempt count ≤ 2.** If this is the third validation cycle on the same PR, the PR is escalated instead of fixed again.
+12. **At most one repair pass.** When the first pass asks for changes, `dark-factory-validate-pr` runs a single fix node in a fresh context and validates again. If the second pass still asks for changes, the PR is escalated to `factory:needs-human`; it is not fixed a third time. There is no separate fix-PR workflow and no counter outside the run.
 13. **No MISSION.md hard invariants modified.** See section 10.
 
 Gates 1 through 6 are one command, `python harness/ci.py`, and it exits `GATE_OK` only when all six hold.
 
 Auto-merge mechanism: `gh pr review --approve` followed by `gh pr merge --squash`. Squash merges only - clean history, easy rollback.
+
+### The GitHub-side check, and what is not switched on
+
+`.github/workflows/gate.yml` runs `python harness/ci.py --quick` on every pull request and
+on every push to `main`, plus the full gate as a second, informational job. It exists so
+that a merge from the web UI or a push straight to `main` - neither of which the factory
+sees - is still checked by something.
+
+**Today that check blocks nothing.** As this is written the repository has no branch
+protection and no ruleset, `main` accepts merge commits and rebase merges despite the
+squash-only rule above (two merge commits are already in its history), and no check run
+has ever been required. Making it binding is a GitHub settings change, which is a human
+action: the numbered steps are in `README.md`, "Making the gate binding". Nothing in this
+repository can turn them on for itself, and nothing here should be read as saying they are
+on.
+
+One consequence to keep in mind when they are turned on: the validator's
+`gh pr merge --squash` merges immediately, which a required check will refuse until it has
+finished. The merge call then has to wait for the check or pass `--auto`.
 
 ---
 
@@ -152,7 +171,16 @@ Every step is a positive assertion with a count; the rung prints `E2E_PASSED ste
 
 ## 5. Protected Files (Auto-Reject on Any Modification)
 
-Any PR that modifies **any** file matching these patterns is immediately rejected without a fix attempt. The PR is closed, the linked issue is reopened and re-labeled `factory:accepted` for a fresh attempt (unless it hit the fix-attempt cap, in which case escalate).
+Any PR that modifies **any** file matching these patterns is immediately rejected without a fix attempt. The PR is closed, the linked issue is reopened and re-labeled `factory:accepted` for a fresh attempt (unless it already had its one repair pass, in which case escalate).
+
+**`.factory/protected-paths.txt` is the machine-readable form of this section**, and of the
+same list in `CLAUDE.md`. It is what the validator matches a PR's changed files against,
+because a prose list read by a model over a truncated diff is not a check. The two are one
+list in two shapes: **a path added or removed here is added or removed there in the same
+commit**. When the two disagree, this section is what a human meant and the file is what
+the factory actually does, so closing the gap is the first job and never a licence. The
+prose stays the explanation - which part of a partially protected file is protected, and
+why - and the file stays the enumeration.
 
 ### Governance (the constitution)
 
@@ -223,8 +251,8 @@ When a PR is auto-rejected, the validator posts a clear comment explaining which
 
 The factory stops trying and flags for human attention when:
 
-- A PR has failed validation **2 times** (the third cycle escalates instead of fixing again)
-- The fix-PR agent reports it cannot resolve the flagged issues (writes a fix-report and exits without pushing)
+- A PR is still asking for changes **after its one repair pass** - the second pass escalates instead of repairing again
+- The fix node reports it cannot resolve the flagged issues (writes a fix-report and exits without pushing)
 - Triage confidence is low on an issue that is in-scope but ambiguous in an interesting way
 - The comprehensive-test workflow fails twice in a row on the same feature area
 - Security check finds critical or high severity issues (the PR itself is rejected; if the underlying issue cannot be implemented safely, escalate the issue)
@@ -250,7 +278,7 @@ A **judgement** value - a ratchet floor, a confidence tolerance the journey asse
 
 - **Triage batch size: 10 issues per run.** Larger backlogs take multiple orchestrator cycles.
 - **Up to `MAX_PARALLEL` workflows at a time (default 4, configurable via `.env`).** The orchestrator dispatches multiple workflows per cycle with two safeguards: (1) a per-target lock - it parses running `bun run cli workflow run` processes and will not dispatch a workflow whose `(workflow-name, target#N)` pair matches one already in flight, preventing two workflows from racing on the same PR or issue; (2) triage serializes with itself (only one triage run at a time, ever).
-- **Fix attempts per PR: maximum 2.** The third cycle escalates.
+- **Repair passes per validation run: one.** The fix node lives inside `dark-factory-validate-pr`, runs once, and a second pass that still requests changes escalates rather than repairing again.
 - **PR size: 500 lines.** See section 2.
 - **Flood protection.** Non-owner GitHub accounts are capped at 3 issues per UTC calendar day. Excess issues get labeled `factory:rate-limited` and skipped until the next UTC day, when the triage workflow removes the label and re-evaluates them. The repository owner (`alaehassouni-a11y`) is exempt. See section 1.
 
@@ -278,10 +306,9 @@ button nobody knows works.
 
 When the orchestrator runs and nothing is already in flight, it picks exactly one action in this order:
 
-1. **Fix-PR first** - any PR labeled `factory:needs-fix` with < 2 fix attempts
-2. **Validate next** - any PR labeled `factory:needs-review` (oldest first)
-3. **Implement next** - any issue labeled `factory:accepted` but not `factory:in-progress`, highest priority first
-4. **Triage last** - any untriaged issues
+1. **Validate first** - any PR labeled `factory:needs-review` (oldest first). Repair is part of that run, not a separate dispatch: there is no fix-PR workflow for the orchestrator to pick.
+2. **Implement next** - any issue labeled `factory:accepted` but not `factory:in-progress`, highest priority first
+3. **Triage last** - any untriaged issues
 
 This ordering ensures in-flight work completes before new work begins. Triage is lowest priority because PRs rot if they sit.
 
@@ -314,14 +341,18 @@ There are two holdouts, at two heights. The **validator** is a fresh-context ses
 - Any workflow artifacts from the `dark-factory-fix-github-issue` run that produced this PR
 - The commit messages beyond their plain title (the commit *rationale* is the coder's story)
 
-### What the fix-PR workflow reads
+### What the repair pass reads
+
+The repair pass is a node inside `dark-factory-validate-pr`, not a workflow of its own, and
+it starts with a fresh context so that the second validation pass above it is still a
+holdout. It reads:
 
 - The original issue body (for context on what was asked)
 - The PR diff (current state of the branch)
 - The review feedback from the validator ("Changes Requested" comments)
 - `FACTORY_RULES.md` (so it knows what it cannot do)
 
-### What the fix-PR workflow MUST NOT read
+### What the repair pass MUST NOT read
 
 - The validator's full internal reasoning beyond its published review comments
 - The original implementation plan

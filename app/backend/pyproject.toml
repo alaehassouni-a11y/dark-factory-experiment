@@ -85,4 +85,5 @@ testpaths = ["tests"]
 # `backend` is a package under app/, so app/ is the import root.
 pythonpath = [".."]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 addopts = "-v --tb=short"

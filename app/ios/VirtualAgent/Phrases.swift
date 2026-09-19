@@ -1,8 +1,13 @@
 import Foundation
 
-/// The few sentences the app says on its own behalf (status and errors), in the four
+/// Everything the client reads or hears that the app says on its own behalf - status,
+/// errors, button and accessibility labels, the two words under each answer - in the four
 /// supported languages. Everything conversational comes from the service; these exist so
-/// that a failure is explained out loud in the client's language (MISSION Gate 2).
+/// that a failure is explained out loud in the client's language (MISSION Gate 2) and so
+/// that no screen is half in English. A string shown or spoken anywhere else in the app is
+/// a bug `harness/static_ios.py` now fails on. The product name is the one exception: a
+/// name is not translated. The two permission prompts cannot live here, because iOS shows
+/// them before any code runs; they are in `VirtualAgent/<lang>.lproj/InfoPlist.strings`.
 enum Phrase {
     case tapToSpeak
     case listening
@@ -13,11 +18,32 @@ enum Phrase {
     case unauthorized
     case forbidden
     case sessionNotFound
-    case rateLimited(resetsAt: String)
+    case rateLimited(resetsAt: String?)
     case serverError(status: Int)
     case microphoneDenied
     case microphoneUnavailable
     case speechNotUnderstood
+    // What the screen shows and VoiceOver speaks. A label is as much a spoken string as a
+    // sentence is: a French client must not meet an English button.
+    case settings
+    case done
+    case newSession
+    case serviceURL
+    case send
+    case speak
+    case stopListening
+    case language(name: String)
+    case languageNotDetected
+    // The two words under every answer: what the turn was, and where it came from
+    // (API.md's `turn` event, hard invariant 3).
+    case turnAnswer
+    case turnQuestion
+    case turnNoAnswer
+    case turnUnknownKind
+    case sourceWiki
+    case sourceWeb
+    case sourceNone
+    case sourceUnknown
 
     /// `language` is a code from API.md; anything else, including nil, falls back to English.
     func text(in language: String?) -> String {
@@ -58,10 +84,12 @@ enum Phrase {
                         de: "Dieses Gespräch ist beendet. Ich beginne ein neues.",
                         ar: "انتهت هذه المحادثة. سأبدأ محادثة جديدة.")
         case .rateLimited(let resetsAt):
-            return pick(lang, en: "You have reached today's limit. You can continue at \(resetsAt).",
-                        fr: "Vous avez atteint la limite du jour. Vous pourrez continuer à \(resetsAt).",
-                        de: "Sie haben das Tageslimit erreicht. Sie können ab \(resetsAt) weitermachen.",
-                        ar: "لقد وصلت إلى الحد اليومي. يمكنك المتابعة في \(resetsAt).")
+            let when = Phrase.formatResetTime(resetsAt) ?? pick(lang, en: "later today",
+                        fr: "plus tard dans la journée", de: "später am Tag", ar: "لاحقًا اليوم")
+            return pick(lang, en: "You have reached today's limit. You can continue at \(when).",
+                        fr: "Vous avez atteint la limite du jour. Vous pourrez continuer à \(when).",
+                        de: "Sie haben das Tageslimit erreicht. Sie können ab \(when) weitermachen.",
+                        ar: "لقد وصلت إلى الحد اليومي. يمكنك المتابعة في \(when).")
         case .serverError(let status):
             return pick(lang, en: "The service returned an error (\(status)). Please try again.",
                         fr: "Le service a renvoyé une erreur (\(status)). Veuillez réessayer.",
@@ -82,12 +110,56 @@ enum Phrase {
                         fr: "Je n'ai pas compris. Veuillez réessayer.",
                         de: "Das habe ich nicht verstanden. Bitte versuchen Sie es noch einmal.",
                         ar: "لم أفهم ذلك. يرجى المحاولة مرة أخرى.")
+        case .settings:
+            return pick(lang, en: "Settings", fr: "Réglages", de: "Einstellungen", ar: "الإعدادات")
+        case .done:
+            return pick(lang, en: "Done", fr: "Terminé", de: "Fertig", ar: "تم")
+        case .newSession:
+            return pick(lang, en: "New session", fr: "Nouvelle conversation",
+                        de: "Neues Gespräch", ar: "محادثة جديدة")
+        case .serviceURL:
+            return pick(lang, en: "Service address", fr: "Adresse du service",
+                        de: "Dienstadresse", ar: "عنوان الخدمة")
+        case .send:
+            return pick(lang, en: "Send", fr: "Envoyer", de: "Senden", ar: "إرسال")
+        case .speak:
+            return pick(lang, en: "Speak", fr: "Parler", de: "Sprechen", ar: "تحدث")
+        case .stopListening:
+            return pick(lang, en: "Stop listening", fr: "Arrêter l'écoute",
+                        de: "Zuhören beenden", ar: "إيقاف الاستماع")
+        case .language(let name):
+            return pick(lang, en: "Language: \(name)", fr: "Langue : \(name)",
+                        de: "Sprache: \(name)", ar: "اللغة: \(name)")
+        case .languageNotDetected:
+            return pick(lang, en: "not detected yet", fr: "non détectée pour l'instant",
+                        de: "noch nicht erkannt", ar: "لم يتم تحديدها بعد")
+        case .turnAnswer:
+            return pick(lang, en: "answer", fr: "réponse", de: "Antwort", ar: "إجابة")
+        case .turnQuestion:
+            return pick(lang, en: "question", fr: "question", de: "Frage", ar: "سؤال")
+        case .turnNoAnswer:
+            return pick(lang, en: "no answer", fr: "pas de réponse",
+                        de: "keine Antwort", ar: "لا توجد إجابة")
+        case .turnUnknownKind:
+            return pick(lang, en: "unknown", fr: "inconnu", de: "unbekannt", ar: "غير معروف")
+        case .sourceWiki:
+            return pick(lang, en: "wiki", fr: "wiki", de: "Wiki", ar: "الويكي")
+        case .sourceWeb:
+            return pick(lang, en: "web", fr: "web", de: "Web", ar: "الويب")
+        case .sourceNone:
+            return pick(lang, en: "no source", fr: "aucune source",
+                        de: "keine Quelle", ar: "بدون مصدر")
+        case .sourceUnknown:
+            return pick(lang, en: "unknown source", fr: "source inconnue",
+                        de: "unbekannte Quelle", ar: "مصدر غير معروف")
         }
     }
 
-    /// Turns the 429 body's ISO 8601 `resets_at` into a short local time; falls back to the raw value.
-    static func formatResetTime(_ iso: String?) -> String {
-        guard let iso else { return "—" }
+    /// Turns the 429 body's ISO 8601 `resets_at` into a short local time; falls back to the
+    /// raw value, and to nil when the service sent no time at all - the caller then says
+    /// "later today" in the client's language rather than showing a dash.
+    static func formatResetTime(_ iso: String?) -> String? {
+        guard let iso else { return nil }
         let withFraction = ISO8601DateFormatter()
         withFraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         let plain = ISO8601DateFormatter()
@@ -113,7 +185,7 @@ extension AgentAPIError {
         case .unauthorized: return .unauthorized
         case .forbidden: return .forbidden
         case .notFound: return .sessionNotFound
-        case .rateLimited(let resetsAt, _): return .rateLimited(resetsAt: Phrase.formatResetTime(resetsAt))
+        case .rateLimited(let resetsAt, _): return .rateLimited(resetsAt: resetsAt)
         case .invalidServiceURL: return .invalidServiceURL
         case .unprocessable: return .serverError(status: 422)
         case .http(let status, _): return .serverError(status: status)
@@ -126,6 +198,30 @@ extension AgentAPIError {
         switch self {
         case .unauthorized, .forbidden, .notFound: return true
         default: return false
+        }
+    }
+}
+
+extension TurnKind {
+    /// The word under an answer. The wire value is a protocol token, never shown as it is.
+    var phrase: Phrase {
+        switch self {
+        case .answer: return .turnAnswer
+        case .question: return .turnQuestion
+        case .noAnswer: return .turnNoAnswer
+        case .unknown: return .turnUnknownKind
+        }
+    }
+}
+
+extension TurnSource {
+    /// Where the answer came from, in the client's language (hard invariant 3).
+    var phrase: Phrase {
+        switch self {
+        case .wiki: return .sourceWiki
+        case .web: return .sourceWeb
+        case .noSource: return .sourceNone
+        case .unknown: return .sourceUnknown
         }
     }
 }

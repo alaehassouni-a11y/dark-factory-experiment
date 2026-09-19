@@ -16,12 +16,14 @@
     "a set widened                        -> language-set-gains-spanish",
     "an order inverted                    -> web-before-wiki",
     "a guard removed                      -> transcript-loses-its-guard",
+    "a guard WEAKENED, not removed        -> any-valid-token-opens-any-session",
+    "a provider pinned loose              -> embedding-model-swapped",
     "an output made constant              -> source-is-always-wiki, arabic-never-detected",
     "a live property quietly dropped      -> sentences-only-at-the-end",
     "",
     "Every defect is TYPE-CLEAN and LINT-CLEAN on purpose. A mutation that ruff or mypy",
     "catches has measured the compiler, not the harness. They aim at MISSION hard",
-    "invariants 1 through 5 and at the one property the requirement calls 'live'."
+    "invariants 1 through 6 and at the one property the requirement calls 'live'."
   ],
 
   "_written": "2026-09-04, the day after the holdout, against the first implementation.",
@@ -75,6 +77,20 @@
       "find": "async def read_session(session: Session = Depends(get_current_session)) -> dict[str, object]:\n    return session.to_dict()",
       "replace": "async def read_session(session_id: str) -> dict[str, object]:\n    found = store.get(session_id)\n    if found is None:\n        raise HTTPException(status_code=404, detail=\"Unknown session\")\n    return found.to_dict()",
       "why": "A guard removed. MISSION hard invariant 4: anyone with a session id can now read its transcript. The route still 404s on unknown ids and still returns the right shape, so it looks finished. Only a check that walks the assembled app, or actually tries another token, can see it."
+    },
+    {
+      "id": "any-valid-token-opens-any-session",
+      "file": "app/backend/auth.py",
+      "find": "    if not secrets.compare_digest(session.token, token):",
+      "replace": "    if not any(secrets.compare_digest(s.token, token) for s in store._sessions.values()):",
+      "why": "MISSION hard invariant 4, weakened rather than removed - the shape a guard takes when someone 'fixes' a token check they did not understand. The route still depends on get_current_session, an anonymous request is still 401 and an unknown session is still 404, so every check that counts dependencies or probes anonymously stays green. But any client holding ANY live session token can now read, continue and delete every other client's session: burn its cap, write into its transcript, end it. Type-clean: compare_digest over a dict of sessions returns bool."
+    },
+    {
+      "id": "embedding-model-swapped",
+      "file": "app/backend/config.py",
+      "find": "EMBEDDING_MODEL: str = \"openai/text-embedding-3-small\"",
+      "replace": "EMBEDDING_MODEL: str = \"openai/text-embedding-3-large\"",
+      "why": "MISSION hard invariant 6 is not only 'one provider', it is a pinned inference stack. WIKI_MIN_SIMILARITY = 0.30 was measured against text-embedding-3-small; on a different model that number, and the wiki-or-web confidence decision built on it, are an unmeasured guess. The stubs echo whatever model name they are handed, so the journey cannot see it, and nothing in tests/ names the constant. Type-clean: a string is a string."
     },
     {
       "id": "sentences-only-at-the-end",

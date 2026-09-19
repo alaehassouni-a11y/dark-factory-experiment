@@ -1,8 +1,8 @@
 # The Dark Factory Experiment (Virtual Agent)
 
-**A public Dark Factory experiment.** This repository is a working product that is built, reviewed, and merged almost entirely by AI coding agents. Humans do two things: file issues and promote releases. Everything in between - triage, implementation, code review, testing, merging - is handled by Archon workflows running on a cron.
+**A public Dark Factory experiment.** This repository is a working product that is built, reviewed, and merged almost entirely by AI coding agents. Humans do one thing: file issues. Everything after that - triage, implementation, code review, testing, merging - is handled by Archon workflows running on a cron, and the deploy happens on its own: there is no release branch and no promotion step, so a merge to `main` is picked up by a systemd timer on the VPS and swapped into production within one tick. The brake is a hold file on the host (`/opt/virtualagent/.hold`): with it in place the new commit is still built and health-checked on the inactive colour but no traffic is sent to it until a person flips. That is a human reaching for a lever, not a checkpoint every change passes through.
 
-Two honest caveats, because they are the design and not an asterisk. This runs at **level 4, not level 5**: the factory does not write its own issues. And there is a deliberate **human-authored perimeter** it is never allowed to touch - the session token check, the daily turn cap, the language set, the deploy configs, the holdout, the ratchet, and the three governance files that define its own rules. The list is in `FACTORY_RULES.md`, and a PR touching any of it is auto-rejected before anything else is evaluated. An autonomous system is only as trustworthy as the things it cannot change about itself.
+Two honest caveats, because they are the design and not an asterisk. This runs at **level 4, not level 5**: the factory does not write its own issues. And there is a deliberate **human-authored perimeter** it is never allowed to touch - the session token check, the daily turn cap, the language set, the deploy configs, the holdout, the ratchet, and the three governance files that define its own rules. The list is in `FACTORY_RULES.md` §5, with `.factory/protected-paths.txt` as its machine-readable twin - the file the validator actually matches a PR's changed files against - and a PR touching any of it is auto-rejected before anything else is evaluated. An autonomous system is only as trustworthy as the things it cannot change about itself.
 
 The product itself is the **Virtual Agent**: a spoken assistant for a business's clients. A client opens an iPhone app, speaks or types in French, English, German or Arabic, and the agent answers aloud in that language, live, from a wiki built out of the `virtualagent/resources` folder in this repository. When the wiki does not cover the question the agent searches the web and says so. When neither does, it says it does not know. But the *real* point of this repo is the factory that builds it.
 
@@ -29,7 +29,7 @@ There's a stack of three distinct things doing the work, and it's worth pulling 
 
 Model routing is the cheapest lever in the whole system, and it is worth treating as one. The factory has run on MiniMax M2.7 and on Kimi K2.6 via Pi at different points in the experiment; the workflows under `.archon/workflows/` currently declare `provider: claude` with `sonnet` for reasoning nodes and `haiku` for cheap extraction. Nothing else in the design changes when that swaps, which is the point: the agent and the model are the interchangeable parts, and the plumbing around them is not.
 
-The mixed-provider benchmark under [`.archon/workflows/benchmark/`](.archon/workflows/benchmark) is where that gets measured rather than assumed - a matrix varying the plan and implement models independently to find out where reasoning actually pays for itself. Read `BENCHMARK-PLAYBOOK.md` there before quoting any number from it; it documents a known prompt-parity confound in the premium baseline cell. The benchmark predates the Virtual Agent and its cells were measured against the previous product.
+A mixed-provider benchmark once measured that rather than assuming it - a matrix varying the plan and implement models independently to find out where reasoning actually pays for itself. It was run against DynaChat, the product this repository built until 2026-09-03, and every number in it is a DynaChat number: its candidate issues name files that no longer exist. It is archived, unrunnable as written, under [`docs/archive/benchmark-dynachat/`](docs/archive/benchmark-dynachat). Read `BENCHMARK-PLAYBOOK.md` there before quoting anything from it; it documents a known prompt-parity confound in the premium baseline cell.
 
 ### How a change actually ships
 
@@ -52,15 +52,24 @@ The mixed-provider benchmark under [`.archon/workflows/benchmark/`](.archon/work
                        │
                        ▼
                 ┌─────────────┐
-                │    main     │  AI-managed branch
-                │ auto-deploys│  → blue/green swap on the VPS
+                │    main     │  AI-managed branch, and the deploy ref
                 └──────┬──────┘
-                       │  human promotes periodically
+                       │  deploy timer on the VPS, next tick
                        ▼
-                ┌─────────────┐
-                │  release/*  │  human-cut stable
-                └─────────────┘
+                ┌─────────────────────────────┐
+                │  build inactive colour      │
+                │  healthcheck (wiki indexed) │
+                │  flip Caddy ─► production   │
+                └─────────────────────────────┘
+                   the brake: `/opt/virtualagent/.hold` on the host
+                   stops the flip — built and health-checked, not
+                   live, until a person removes it and flips
 ```
+
+**There is no release branch and no promotion step.** A merged PR is in front of clients
+on the next timer tick, and the only thing between the two is the Docker healthcheck,
+which passes when the process answers `/api/health` with its wiki indexed. `FACTORY.md`
+says what that does and does not prove.
 
 ### Labels are the state machine
 
@@ -68,7 +77,7 @@ The orchestrator does not hold state itself. It reads GitHub labels and decides 
 
 **Issues:** `factory:triaging` → `factory:accepted` → `factory:in-progress` → (PR opened) or `factory:rejected` (closed with reason).
 
-**PRs:** `factory:implementing` → `factory:needs-review` → `factory:approved` (auto-merged) or `factory:needs-fix` → back to review (max 2 fix attempts) → `factory:needs-human` (escalated).
+**PRs:** `factory:implementing` → `factory:needs-review` → `factory:approved` (auto-merged) or `factory:needs-human` (escalated). A PR that needs changes is repaired **inside** the validation run - one fix pass in a fresh context, then a second validation pass, and if that one still asks for changes the PR escalates. There is no separate fix-PR workflow and no cross-run attempt counter. (`factory:needs-fix` still exists as a label and nothing consumes it; a PR that lands on it is a dead end, not a queue.)
 
 **Priority:** Triage tags every accepted issue `priority:critical|high|medium|low` so the orchestrator picks the highest-impact work first.
 
@@ -79,7 +88,7 @@ These come from research on every prior Dark Factory attempt (StrongDM, Spotify 
 1. **The validator never reads the implementation plan.** It checks the *outcome* against the *issue*, not the approach. This is StrongDM's "holdout" pattern - it's what stops an agent from gaming its own acceptance criteria. Above that sits a second holdout the builder cannot even read: `.factory/holdout/run.py`, written from the PRD before the code existed.
 2. **Triage has only two verdicts: accept or reject.** No "needs human" inbox. If a human disagrees with a rejection, they reopen with more context and the next triage cycle picks it up fresh.
 3. **Governance files (`MISSION.md`, `FACTORY_RULES.md`, `CLAUDE.md`) can never be modified by the factory.** The security review hard-fails any PR that touches them. The agent cannot amend the rules it is judged by.
-4. **The dispatcher is dumb on purpose.** Pure bash on a 30-minute cron, reading GitHub labels as the only shared state - no database, no message bus, no LLM deciding what to run. An earlier version asked a model what to dispatch and it hallucinated runs for work that did not exist. It dispatches up to `MAX_PARALLEL=4` workflows, in a fixed priority order: fix a PR, validate a PR, implement an issue, triage. Finishing in-flight work before starting new work is load-bearing - reversed, the factory triages forever while its own PRs rot.
+4. **The dispatcher is dumb on purpose.** Pure bash on a 30-minute cron, reading GitHub labels as the only shared state - no database, no message bus, no LLM deciding what to run. An earlier version asked a model what to dispatch and it hallucinated runs for work that did not exist. It dispatches up to `MAX_PARALLEL=4` workflows, in a fixed priority order: validate a PR, implement an issue, triage. Finishing in-flight work before starting new work is load-bearing - reversed, the factory triages forever while its own PRs rot.
 5. **Flood protection.** Non-owner accounts are capped at 3 issues per UTC day; excess get `factory:rate-limited` and re-evaluated after midnight.
 6. **Per-node budget caps.** Every workflow node has a `maxBudgetUsd`. Triage batches max 10 issues per run and truncates each body to ~2KB.
 
@@ -99,7 +108,7 @@ Defined in [`.archon/workflows/`](.archon/workflows):
 of its own, and everything it reads is visible in this repo's issues, PRs and labels.
 The one thing it does read from here first is the stop button, `scripts/factory-stop.sh`.
 
-The mixed-provider benchmark suite lives separately in [`.archon/workflows/benchmark/`](.archon/workflows/benchmark). It is not part of the factory loop.
+The mixed-provider benchmark suite is archived in [`docs/archive/benchmark-dynachat/`](docs/archive/benchmark-dynachat). It is not part of the factory loop and it is not run.
 
 ### The gate
 
@@ -110,6 +119,44 @@ process with stub providers, the holdout scenarios the builder cannot read, and 
 mutation set that breaks the product on purpose and requires the gate to notice.
 `.factory/locks/floor.json` is the ratchet: the numbers the gate must at least reach,
 raised only by human commits.
+
+The same gate also runs on GitHub, in `.github/workflows/gate.yml`: `harness/ci.py --quick`
+on every pull request and on every push to `main`, plus the full gate as a second job that
+is allowed to fail. It needs no secrets, because the journey, the holdout and the mutation
+set all run against the stubs.
+
+### Making the gate binding
+
+**Right now that check blocks nothing.** `main` has no branch protection and no ruleset,
+it still accepts merge commits and rebase merges even though the rules say squash only
+(two merge commits are already in its history), and no check has ever been required to
+pass. The workflow reports; it does not stop anything. Turning it into a gate is five
+clicks in GitHub's settings, which no code in this repository can do for itself. For the
+owner, in order:
+
+1. Open the repository on github.com → **Settings** → **General** → *Pull Requests*.
+   Untick **Allow merge commits** and **Allow rebase merging**, leave **Allow squash
+   merging** ticked, and tick **Automatically delete head branches**. Nothing saves
+   separately on that page; the tickboxes save themselves.
+2. Go to **Settings** → **Rules** → **Rulesets** → **New ruleset** → *New branch ruleset*.
+   Name it `main`, set **Enforcement status** to **Active**.
+3. Under *Target branches* choose **Add target** → **Include default branch**.
+4. Under *Rules* tick **Require a pull request before merging** (set required approvals to
+   **0** - every PR here is owner-authored and the factory's review is a comment, so
+   requiring an approval would deadlock the loop), and tick **Require status checks to
+   pass**. Then **Add checks**, search for `quick gate (static + unit)` and add it. Do not
+   add the full-gate job: it is informational and allowed to fail.
+5. Under *Bypass list* add yourself as the repository owner, so the direct pushes to
+   `main` that `FACTORY_RULES.md` §12 depends on - editing the rules themselves - still
+   work. Then **Create**.
+
+The check only appears in step 4's search once the workflow has run at least once, so
+merge a PR (or push) first and add the check afterwards.
+
+One consequence worth knowing before you switch it on: the validator merges with a plain
+`gh pr merge --squash`, which a required check will refuse until it has finished running.
+That call will need to wait for the check or use `--auto`. It is in `.archon/workflows/`,
+which is human-authored.
 
 ---
 
@@ -132,7 +179,7 @@ compressed to what the factory has to obey.
 │                      │                        │      │        (RRF fused)    │
 └──────────────────────┘                        │  confident? ── yes ─► compose│
                                                 │      │ no                    │
-                                                │  web search (Brave) ► compose│
+                                                │  web search (Sonar) ► compose│
                                                 │      │ none                  │
                                                 │  "I do not know", source none│
                                                 │                              │

@@ -139,7 +139,23 @@ pretend `--quick` covers it. Both are judgement changes and human commits.
 
 ## D-007 · The real wiki has one document
 
-**Status:** open · **Raised:** 2026-09-04 · **Blocks:** the PRD's falsification test
+**Status:** closed 2026-09-19 · **Raised:** 2026-09-04 · **Blocked:** the PRD's
+falsification test, until it did not
+
+**2026-09-19:** closed. `virtualagent/resources/` now holds **nine** knowledge documents:
+the about-page plus eight on bonsai care, seven in English and one in French
+(`entretien-d-un-bonsai.md`). `README.md` in that folder documents the format and is not
+indexed. The falsification test the entry said
+could not be run was run on 2026-09-06 (`00e6a0d`): retrieval was measured over that
+folder with `text-embedding-3-small`, in all four languages, on covered and uncovered
+questions, and four findings from it changed the confidence decision and the excerpt
+selection. Covered questions - including one in Arabic against Latin-script documents -
+answer from the wiki; the Louvre and the Eiffel Tower still go to the web. The documents
+are samples, not a business's wiki, so "most answers from the wiki" is established for
+this corpus and not for a client's; a real deployment mounts its own folder (D-008) and
+the question is open again there, for that folder, and not here.
+
+The original entry, unchanged:
 
 `virtualagent/resources/` holds `about-the-virtual-agent.md` and nothing else. The
 business's documents - the ones the requirement calls "a wiki" - are not in the folder.
@@ -198,3 +214,62 @@ the closed source set are untouched. No cited page means no web source and no re
 harness keeps its Brave-shaped stubs, so the gate is unchanged. Cost: about half a cent per
 web turn, search included. Latency: Sonar answers before Claude speaks, a few seconds more
 than a wiki turn.
+
+---
+
+## D-010 · A merge to `main` is the deploy; the hold file is the brake
+
+**Status:** decided by the owner · **Raised:** 2026-09-19 · **Kind:** judgement, recorded
+because three documents claimed otherwise
+
+`FACTORY.md`, `README.md` and the README's pipeline diagram said a human promoted releases
+from `main` to a `release/*` branch. No such branch has ever existed, no tag has ever been
+cut, and nothing under `deploy/` reads a promotion ref: `deploy.sh` polls `main` on a
+systemd timer, builds the inactive colour, waits for the Docker healthcheck and flips
+Caddy. The checkpoint readers believed in was a sentence.
+
+**Decided:** keep the model and fix the sentences. Level 4 includes production. The
+documents now say that a merged PR reaches clients on the next timer tick and that the
+healthcheck - an HTTP 200 on `/api/health` with the wiki indexed, against the real model
+the gate never sees - is the only thing between the two.
+
+**The brake, and what it is not.** `deploy.sh` honours a hold file on the host
+(`$ROOT/.hold`, or `VIRTUALAGENT_NO_FLIP=1`): with it in place the new commit is still
+pulled, built and health-checked on the inactive colour, and simply not given traffic
+until someone removes the hold and runs `deploy.sh flip`. That makes a canary possible and
+gives a person somewhere to stand during a risky change. It is opt-in and off by default,
+so it is a lever, not a gate, and nothing in this repository claims otherwise.
+
+**What was accepted along with it.** Every flip restarts the process, and sessions and the
+daily turn counter live in memory (`CLAUDE.md`, footgun 1): each deploy drops every live
+conversation and resets every client's cap. Several merges in a day means several resets.
+That is the price of no promotion step, it is written into `CLAUDE.md`'s footguns, and the
+fix - persistence - is listed in the PRD as not-yet.
+
+---
+
+## D-011 · The mixed-provider benchmark is archived, not maintained
+
+**Status:** decided by the owner · **Raised:** 2026-09-19 · **Kind:** product (of the
+factory, not of the agent)
+
+The benchmark under `.archon/workflows/benchmark/` - thirteen files, a playbook, a
+candidate list, ten cell workflows and an evaluator - measured plan-model against
+implement-model on **DynaChat**, the product this repository built until 2026-09-03. Its
+candidate issues name files that do not exist here, its playbook hardcodes another
+machine's paths and another account's repo, and its cells would open real draft PRs
+against this repository. It sat under `.archon/workflows/**`, which `FACTORY_RULES.md` §5
+protects, so it was human-maintained, runnable and pointing at a product that is gone,
+with no entry in this file saying why.
+
+**Decided:** move the thirteen files to `docs/archive/benchmark-dynachat/` and put a
+`README.md` in front of them saying what product they measured, when, and that every
+number in them is a DynaChat number. They
+are kept because the measurements were real and the write-up is the only record of them;
+they are not maintained, not run, and not part of the factory loop. `README.md`'s two
+references point at the archive and say so.
+
+A re-run against the Virtual Agent is a separate decision and a separate piece of work:
+new candidate issues that avoid the protected paths, the paths and the owner fixed, the
+run-count arithmetic fixed, and an evaluator that fails loudly when the artefact it scores
+is absent rather than scoring it full marks. Nothing here assumes that will happen.

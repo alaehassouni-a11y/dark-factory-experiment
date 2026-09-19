@@ -1,0 +1,3 @@
+/* Les deux demandes d'autorisation, les premiers mots que l'application affiche. */
+"NSMicrophoneUsageDescription" = "Virtual Agent écoute votre question afin de pouvoir y répondre à voix haute.";
+"NSSpeechRecognitionUsageDescription" = "Virtual Agent transforme ce que vous dites en texte pour l'envoyer à l'agent.";

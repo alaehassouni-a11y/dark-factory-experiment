@@ -20,9 +20,13 @@ final class SessionViewModel: ObservableObject {
     private let input: SpeechInput
     private let output: SpeechOutput
     private var session: ActiveSession?
-    private var recognizerLocale = SupportedLanguage.en.voiceLocale
+    /// The service's language table, fetched once; the compiled-in fallback until then.
+    @Published private var languages = LanguageTable.fallback
+    private var languagesLoaded = false
+    private var recognizerLocale = LanguageTable.defaultVoiceLocale
     private var turnTask: Task<Void, Never>?
     private var sessionTask: Task<Void, Never>?
+    private var languagesTask: Task<Void, Never>?
 
     init(defaults: UserDefaults = .standard, input: SpeechInput = SpeechInput(), output: SpeechOutput = SpeechOutput()) {
         self.defaults = defaults
@@ -32,9 +36,9 @@ final class SessionViewModel: ObservableObject {
         self.serviceURLString = defaults.string(forKey: Self.serviceURLKey) ?? Self.defaultServiceURL
     }
 
-    /// Badge text: the language name for a supported code, the code itself otherwise, nil before any is known.
+    /// Badge text: the name the service gives the current language, nil before any is known.
     var languageName: String? {
-        currentLanguage.map { SupportedLanguage(rawValue: $0)?.name ?? $0 }
+        currentLanguage.map { languages.name(for: $0) }
     }
 
     func phrase(_ phrase: Phrase) -> String {
@@ -170,6 +174,7 @@ final class SessionViewModel: ObservableObject {
         }
         phase = .connecting
         errorMessage = nil
+        loadLanguages(api)
         // A cancelled opener (New session tapped while connecting) must not touch the
         // state the replacement is already building.
         defer { if !Task.isCancelled { phase = .idle } }
@@ -180,11 +185,29 @@ final class SessionViewModel: ObservableObject {
             session = ActiveSession(id: response.sessionId, token: response.sessionToken)
             currentLanguage = response.language
             // API.md voice contract: device locale if supported, else English, until the first `language` event.
-            recognizerLocale = (Self.deviceLanguage() ?? .en).voiceLocale
+            recognizerLocale = languages.voiceLocale(for: response.language ?? Self.deviceLanguage()?.rawValue)
             messages = [TranscriptMessage(role: .agent, text: response.greeting.text, kind: .question, source: .noSource)]
             output.speak(response.greeting.text, localeIdentifier: response.greeting.voiceLocale)
         } catch {
             handle(error)
+        }
+    }
+
+    /// Asks the service for its language table, once per process, beside the session it is
+    /// opening: the badge name, the recogniser's locale and the voice of the app's own
+    /// phrases all come from it (CLAUDE.md: the app never maps a language to a locale
+    /// itself). Best effort - a failure leaves the compiled-in fallback in place and is
+    /// never shown to the client, who has a working session either way.
+    private func loadLanguages(_ api: AgentAPI) {
+        guard !languagesLoaded else { return }
+        languagesTask?.cancel()
+        languagesTask = Task { [weak self] in
+            guard let fetched = try? await api.languages(), !fetched.isEmpty else { return }
+            guard let self, !Task.isCancelled else { return }
+            self.languagesLoaded = true
+            self.languages = LanguageTable(fetched)
+            self.recognizerLocale = self.languages.voiceLocale(
+                for: self.currentLanguage ?? Self.deviceLanguage()?.rawValue)
         }
     }
 
@@ -225,7 +248,9 @@ final class SessionViewModel: ObservableObject {
             // English, to continue in a supported language, and the recogniser stays as is.
             guard let code = detected.language else { return }
             currentLanguage = code
-            recognizerLocale = detected.voiceLocale ?? SupportedLanguage(rawValue: code)?.voiceLocale ?? recognizerLocale
+            // The event carries the locale the service chose; the table answers only when
+            // an older service left it out.
+            recognizerLocale = detected.voiceLocale ?? languages.voiceLocale(for: code)
         case .token(let token):
             update(id) { $0.text += token }
         case .sentence(let sentence):
@@ -266,8 +291,7 @@ final class SessionViewModel: ObservableObject {
         let text = phrase.text(in: currentLanguage)
         errorMessage = text
         output.stop()
-        let locale = SupportedLanguage(rawValue: currentLanguage ?? "")?.voiceLocale ?? SupportedLanguage.en.voiceLocale
-        output.speak(text, localeIdentifier: locale)
+        output.speak(text, localeIdentifier: languages.voiceLocale(for: currentLanguage))
     }
 
     private func makeAPI() -> AgentAPI? {

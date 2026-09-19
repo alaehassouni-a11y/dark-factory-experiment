@@ -1,3 +1,10 @@
+> **Archived 2026-09-19.** This is a record of an experiment, not a live procedure.
+> It measured DynaChat, the chat/RAG/video product this repository replaced with the
+> Virtual Agent on 2026-09-03. Every path, source file, candidate issue, repository
+> owner, machine path and number below refers to that product. Nothing here runs
+> against the current one, and the dispatch procedure it describes is the mechanism
+> that starved the factory from 2026-05 to 2026-08 (see FACTORY.md). Do not follow it.
+
 # Benchmark Issue Candidates
 
 Three candidate issues to file for the matrix run. Picked to span: concurrency reasoning, text-processing edge cases, and domain-specific semantics. Each is sized to require *reasoning* to identify the right approach but *only a small diff* to fix — the precise shape that tests "where does reasoning matter."

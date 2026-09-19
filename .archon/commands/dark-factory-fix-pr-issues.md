@@ -23,7 +23,7 @@ This is a fresh-context session — you start with no prior knowledge of how thi
 
 1. **Fix ONLY the issues listed in `issues_to_fix`.** Do not refactor unrelated code. Do not "improve" things that weren't flagged. Do not reformat files the validator didn't mention. The next validation pass will reject scope-broadening.
 2. **Never modify tests to make tests pass.** If a test failure is in `issues_to_fix`, fix the source code that the test is exercising. Pre-existing passing tests must not be touched.
-3. **Never modify governance files**: `FACTORY_RULES.md`, `MISSION.md`, `CLAUDE.md`, `docs/virtualagent.prd.md`, `.github/**`, `deploy/**`, `harness/**`, `.factory/**`, `.env*`, `.archon/config.yaml`, `.archon/workflows/**`, `.archon/commands/**`. Any attempt will trigger an auto-reject on pass-2.
+3. **Never modify — or stage — a protected file.** The canonical list is `.factory/protected-paths.txt`; in prose: `FACTORY_RULES.md`, `MISSION.md`, `CLAUDE.md`, `docs/virtualagent.prd.md`, `.github/**`, `deploy/**`, `harness/**`, `.factory/**`, `.claude/**`, `scripts/factory-stop.sh`, `.env*`, `.archon/**`. Any attempt triggers an auto-reject on pass-2 — and so does accidentally *committing* the validator's own overlay of those paths, which is why Phase 5 commits by pathspec.
 4. **Never add new dependencies** unless the validator's feedback explicitly says a new dep is needed to fix a specific issue.
 5. **Respect the MISSION hard invariants** (per CLAUDE.md §The Contract That Must Not Regress): the four-language set, wiki before web, a declared source on every turn, the session token check, the 100 turns/client/day cap, OpenRouter as the only provider, and the SSE format in `docs/API.md`.
 6. **Maximum PR size 500 lines changed total.** If the existing PR is already close to 500 lines and your fixes would push past it, STOP and leave a comment explaining — the PR should be split.
@@ -53,9 +53,18 @@ You are in a worktree with the PR branch checked out (`gh pr checkout` was done 
 
 ```bash
 git branch --show-current   # should show the PR branch, not main
-git status                  # should be clean
+git status                  # see below — this is NOT expected to be clean
 git log --oneline -5        # see the PR commits (you may read these for blame context ONLY — not for rationale)
 ```
+
+`git status` will normally show modifications under `.archon/`, `.claude/`,
+`harness/`, `.factory/` and `scripts/factory-stop.sh`. **Those are not yours
+and you must never commit them.** The validator overlays the judge and the
+prompts from `origin/main` into this worktree before you run, so that a PR is
+never judged by its own copy of the gate; the drift you see is main-vs-branch,
+not a change anyone made. Committing it would make the PR look like it edited
+governance, and pass-2's security check would reject and close it for a change
+the validator itself made. Stage by explicit path, always (Phase 5).
 
 ### Phase 2: Plan the fixes (in your head, not in a file)
 
@@ -94,19 +103,40 @@ If any of these fail on code YOU didn't touch, that's a pre-existing issue — d
 
 ### Phase 5: Commit and push
 
+Commit **by pathspec**, so only the files you actually edited can land, whatever
+else happens to be in the index:
+
 ```bash
-git add <only the files you changed>
+# 1. Refuse to proceed if anything infra is staged. The overlay described in
+#    Phase 1 lives in the worktree; if it has reached the index, something
+#    staged it and the commit below would ship it as a governance change.
+STAGED_INFRA=$(git diff --cached --name-only | grep -E '^(\.archon|\.claude|harness|\.factory)/|^scripts/factory-stop\.sh' || true)
+if [ -n "$STAGED_INFRA" ]; then
+  git reset -q -- .archon/ .claude/ harness/ .factory/ scripts/factory-stop.sh
+  echo "unstaged validator overlay: $STAGED_INFRA"
+fi
+
+# 2. Commit the files you changed, by pathspec. `git commit -- <paths>` commits
+#    exactly those paths and ignores the rest of the index; a bare `git commit`
+#    would commit everything staged.
 git commit -m "fix: address validation pass-1 feedback
 
 $(echo "$synthesize-verdict-pass-1.output" | jq -r '.issues_to_fix | map("- " + .description) | join("\n")')
 
 Refs: PR validation pass 1
-Workflow: $WORKFLOW_ID"
+Workflow: $WORKFLOW_ID" -- <only the files you changed>
 
-git push
+# 3. Prove nothing infra slipped in before pushing.
+if git show --pretty=format: --name-only HEAD | grep -qE '^(\.archon|\.claude|harness|\.factory)/|^scripts/factory-stop\.sh'; then
+  echo "ABORT: the commit contains protected paths - do not push; report this and stop."
+else
+  git push
+fi
 ```
 
-Use `git add` with explicit file paths, never `git add -A` or `git add .` (FACTORY_RULES.md §Implementation Rules — risk of staging leftover state).
+Never `git add -A`, never `git add .`, never a bare `git commit` (FACTORY_RULES.md §Implementation Rules — risk of staging leftover state).
+
+**Never stage anything under `.archon/`, `.claude/`, `harness/`, `.factory/`, or `scripts/factory-stop.sh`**, even when `git status` shows them modified. See Phase 1: that is the validator's overlay, not a change of yours.
 
 ### Phase 6: Report back
 
@@ -154,7 +184,7 @@ Never invent a fix you're not confident in just to clear the list.
 ## Success Criteria
 
 - **SCOPE_CONTAINED**: Every file you modified corresponds to an entry in `issues_to_fix` (or was a file you had to touch to cascade a dep — note this in the commit).
-- **NO_GOVERNANCE_TOUCHED**: You did not modify FACTORY_RULES.md, MISSION.md, CLAUDE.md, or any file under `.github/` or `.archon/`.
+- **NO_GOVERNANCE_TOUCHED**: Nothing on `.factory/protected-paths.txt` is in your commit — not modified, not staged, not carried in from the validator's overlay.
 - **LOCAL_VALIDATION_GREEN**: ruff/mypy (and static_ios for Swift) all pass on the changed files before you committed.
-- **PUSHED**: `git push` succeeded (otherwise pass-2 validates stale code).
+- **PUSHED**: `git push` succeeded, and the PR's head on GitHub is now your commit. `fetch-diff-p2` re-checks this and fails the run if the two disagree, because pass 2 validating stale code is how ungated work reaches main — say plainly in your report whether the push landed.
 - **HONEST_REPORT**: If any issues were not fully addressed, you said so explicitly — no pretending.

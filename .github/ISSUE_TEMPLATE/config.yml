@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Questions about the Virtual Agent
-    url: https://github.com/alaehassouni-a11y/dark-factory-experiment/discussions
-    about: Ask questions in Discussions. Issues are only for bug reports and feature requests — questions filed as issues will be auto-rejected by triage.
+    url: https://github.com/alaehassouni-a11y/dark-factory-experiment/blob/main/README.md
+    about: Start with the README, then MISSION.md (what the product is), docs/API.md (the service contract) and FACTORY_RULES.md (how the factory decides). Issues are only for bug reports and feature requests — questions filed as issues are rejected by triage, with a pointer back here.

@@ -1,21 +1,18 @@
 {
   "_what_this_is": "THE RATCHET. Protected, so only a human commit can move these numbers. harness/ratchet.py asserts observed >= floor against the gate log after every full run, and with --base asserts floor(head) >= floor(base) - so 'delete the assertion and lower the number in the same commit' is not available. Until 2026-09-04 nothing read this file; the ratchet script is what made the previous sentence true.",
-
   "_slack_is_zero_here_on_purpose": "These are set EQUAL to what the harness currently observes, not below it. The gap between observed and floor is exactly the number of assertions that can be deleted with the gate still green, and it GROWS as the harness improves, because raising the floor is a protected edit the factory cannot make. Zero slack forces the raise into the same human commit that accepts the new assertions, which is mildly annoying every time and is the entire reason the number means something.",
-
-  "static_checks": 6,
-  "unit_tests": 75,
-  "e2e_steps": 12,
-  "holdout_assertions": 32,
-  "mutations_total": 8,
-
-  "_measured_2026_09_06": "python harness/ci.py -> STATIC_OK (static.py: checks=6, ruff-lint, ruff-format, mypy, ios-manifests, ruff-lint-tools, ruff-format-tools), UNIT_PASSED tests=75 (66 service + 9 wiki import tool), APP_STARTED, E2E_PASSED steps=12, HOLDOUT_PASSED scenarios=5 assertions=32, MUTATIONS_TOTAL=8 MUTATIONS_CAUGHT=8 MUTATIONS_NOT_INJECTED=0 MUTATIONS_ABOVE_LINE=7, GATE_OK mode=full. Raised from 4/52 on 2026-09-04 when the live wiki (four service tests), smarter lexical retrieval (three) and tools/wiki (nine tests, two lint checks) joined the gate. Product replaced 2026-09-03; every number above was re-measured against the Virtual Agent, and the DynaChat-era numbers (549 unit, 9 holdout, 4 mutations) are in git history.",
-
-  "_where_each_count_comes_from": "unit_tests, e2e_steps, holdout_assertions and mutations_total are the markers ci.py prints. static_checks is the count harness/static.py leaves in harness/.run/static-checks, because ci.py swallows a passing rung's output; a static rung that silently became three tools would drop that file's number and fail here.",
-
-  "_independence_2026_09_04": "MUTATIONS_ABOVE_LINE=7 of 8. The holdout catches every defect except sentences-only-at-the-end, which only the unit suite sees: the holdout has no liveness scenario, so a builder who could edit the unit suite could ship an agent that speaks nothing until the end. The first measurement read 1 of 8 because the runner stopped at the first red rung and unit runs first; the runner now runs the holdout regardless and reports MUTATIONS_ABOVE_LINE, which is the number to watch.",
-
+  "static_checks": 7,
+  "unit_tests": 78,
+  "e2e_steps": 25,
+  "holdout_assertions": 47,
+  "mutations_total": 10,
+  "mutations_above_line": 10,
+  "contract_events": 4,
+  "contract_fields": 66,
+  "phrases_cases": 31,
+  "_where_each_count_comes_from": "Every count is a marker ci.py prints and ratchet.py parses, and the ratchet is now rung 6 of a full run rather than a separate command the validation workflow remembered to call. static_checks is read from the STATIC_OK line, with harness/.run/static-checks kept as a fallback; contract_events, contract_fields and phrases_cases come from the static rung's own marker lines, which ci.py now lifts into the gate log.",
   "_known_gap": "The iOS app is outside the ratchet entirely: no floor can count a check that cannot run on these machines. harness/static_ios.py counts manifest checks and brace balance, and that count is inside static_checks; a compile is not (.factory/decisions.md D-005).",
-
-  "_raise_these": "On the same human commit that adds the assertions. If you find yourself lowering one, the question is what stopped being true."
+  "_raise_these": "On the same human commit that adds the assertions. If you find yourself lowering one, the question is what stopped being true.",
+  "_measured_2026_09_19": "python harness/ci.py -> STATIC_OK checks=7 (ruff-lint, ruff-format, mypy, ios-manifests, ruff-lint-tools, ruff-format-tools, api-contract), PHRASES_OK cases=31, IOS_MANIFESTS_OK checks=33 swift_files=12, CONTRACT_OK events=4 fields=66 bodies=5, UNIT_PASSED tests=78 (67 service + 11 wiki import tool), APP_STARTED, E2E_PASSED steps=25, HOLDOUT_PASSED scenarios=6 assertions=47, MUTATIONS_TOTAL=10 MUTATIONS_CAUGHT=10 MUTATIONS_NOT_INJECTED=0 MUTATIONS_ABOVE_LINE=10, RATCHET_OK floors=5 (now rung 6 of ci.py itself), GATE_OK mode=full. Raised from 6/75/12/32/8 in the same commit that added the assertions: the journey grew from 12 steps to 25 (SSE framing, the auth ordering, 422, DELETE, /api/languages, the daily cap and its resets_at, both decline paths, and the watched wiki re-indexing live); the holdout gained a scenario for MISSION invariant 6 and proves invariant 4 by dependency identity rather than by dependency count; static gained the two-consumer contract check.",
+  "_independence_2026_09_19": "MUTATIONS_ABOVE_LINE=10 of 10, up from 7 of 8. The holdout now has a liveness assertion, so sentences-only-at-the-end - the one defect only the builder-editable unit suite used to catch - is caught above the line. This is the number to watch: if it drops while mutations_total holds, a holdout scenario stopped exercising a mutated path and the gate's independence shrank without any floor noticing. That is why it now has a floor of its own."
 }

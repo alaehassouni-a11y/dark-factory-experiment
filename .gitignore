@@ -1,3 +1,9 @@
+# What this file is for, in one sentence: this repository is PUBLIC and several
+# workflows stage with `git add -A`, so a file that appears for the first time in an
+# unattended run is published. Most of the entries below were added after something
+# did exactly that. Keep the comments: an entry whose reason is gone is an entry
+# nobody dares delete.
+
 # Python
 __pycache__/
 *.pyc
@@ -13,14 +19,6 @@ venv/
 .pytest_cache/
 .ruff_cache/
 
-# Database
-*.db
-*.sqlite
-*.sqlite3
-
-# Node
-node_modules/
-
 # Environment
 .env
 *.env
@@ -30,11 +28,16 @@ node_modules/
 !.env.example
 !**/.env.example
 
-# Key material — nothing in this repo should ever hold one, and a stray copy
-# next to the deploy scripts would otherwise be swept up by `git add -A`.
+# Key material and credential-shaped paths. Nothing in this repo should ever hold one;
+# the danger is the stray copy next to the deploy scripts that a `git add -A` in a
+# workflow nobody is watching sweeps up. On a public repo that is publication, and
+# rotating afterwards is the cleanup, not the fix.
 *.pem
 *.key
 id_rsa*
+credentials.json
+service-account.json
+config/secrets.yml
 
 # Logs
 *.log
@@ -49,8 +52,12 @@ id_rsa*
 .DS_Store
 Thumbs.db
 
-# Test screenshots
-app/screenshots/test-*
+# Agent working directories and per-machine settings. `.claude/worktrees/` holds
+# checkouts of this repo (a nested worktree is a gitlink `git clean -fd` cannot
+# remove, and it arrives inside somebody's `git add -A`); settings.local.json is one
+# developer's permissions, not the project's. Only `.claude/skills/**` is tracked.
+.claude/worktrees/
+.claude/settings.local.json
 
 # Archon per-codebase secrets
 .archon/config.yaml
@@ -61,15 +68,15 @@ app/screenshots/test-*
 # which committed .archon/artifacts/fix-report-pr-67.md by accident.
 .archon/artifacts/
 
-# Pi agent runtime artifacts — created by the kimi-coding provider during a
-# run. These are transient and must never be committed; benchmark workflows do
-# `git add -A`, which would otherwise sweep them into the diff (and only in
-# Kimi-using cells, biasing scope comparisons).
+# Pi agent runtime artifacts — created by the kimi-coding provider during a run.
+# Transient, and they land at the repository root where any `git add -A` finds them.
 .pi-loop.json
 .pi-loop.json.lock
 *.lock.json
 
-# Local benchmark logs + scratch issue bodies (never part of a PR)
+# Local benchmark logs + scratch issue bodies (never part of a PR). The benchmark
+# itself is archived under docs/archive/benchmark-dynachat/ (D-011); these paths stay
+# because a stale log on someone's disk is still a file a stage-everything can pick up.
 .benchmark-logs/
 
 # Runtime deploy state — rewritten by deploy.sh on every blue/green flip,
@@ -81,15 +88,6 @@ deploy/upstream.conf
 
 # The stop button's local half. Presence halts the factory; never commit one.
 .factory-stop
-
-# Credential-shaped paths. The danger is the file that appears for the first time
-# inside a `git add -A` in a workflow nobody is watching - on a public repo that is
-# publication, and rotating afterwards is the cleanup, not the fix.
-credentials.json
-service-account.json
-config/secrets.yml
-*.pem
-*.key
 
 # Factory run artifacts. Per-run scratch; the durable record is the PR and the issue.
 .factory/runs/

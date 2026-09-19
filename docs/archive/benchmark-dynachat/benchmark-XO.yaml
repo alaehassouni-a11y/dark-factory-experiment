@@ -1,9 +1,25 @@
-name: benchmark-XK
+# ARCHIVED 2026-09-19. This file is a record, not a runnable workflow.
+#
+# It belongs to the mixed-provider benchmark of DynaChat, the chat/RAG/video product
+# this repository replaced with the Virtual Agent on 2026-09-03. Every path, source
+# file, candidate issue, repository owner and measured number below refers to that
+# product and does not exist any more.
+#
+# Two hazards, if anyone runs it by hand anyway:
+#   1. It runs NONE of this project's checks. No gate, no holdout, no mutation set.
+#      A pull request it opens has been validated by nothing.
+#   2. Its dispatch procedure labels issues factory:in-progress and never releases
+#      them. That is the mechanism that starved the factory from 2026-05 to 2026-08;
+#      the incident is in FACTORY.md.
+#
+# The live workflows are in .archon/workflows/.
+
+name: benchmark-XO
 description: |
-  Use when: Measuring the value of an explicit planning step (cheap-impl arm).
-  Cell: plan=NONE (skipped), impl=Kimi. The implementer designs the approach
+  Use when: Measuring the value of an explicit planning step.
+  Cell: plan=NONE (skipped), impl=Opus. The implementer designs the approach
         itself directly from exploration, then implements it. Explore +
-        self-review held constant on Sonnet. PR labeled `benchmark:XK`.
+        self-review held constant on Sonnet. PR labeled `benchmark:XO`.
   NOT for: Production dark-factory dispatch.
 
 provider: claude
@@ -72,8 +88,8 @@ nodes:
       4. When done editing, stage and commit:
          `git add -A && git commit -m "impl: address issue"`
       5. Do NOT push or create a PR - the create-pr node handles that.
-    provider: pi
-    model: kimi-coding/kimi-for-coding
+    provider: claude
+    model: opus
     depends_on: [explore]
     context: fresh
 
@@ -107,13 +123,13 @@ nodes:
       set -euo pipefail
       ISSUE_NUM=$(cat "$ARTIFACTS_DIR/.issue-number")
       BRANCH=$(git branch --show-current)
-      CELL="XK"
-      CELL_DESC="plan=NONE, impl=Kimi"
+      CELL="XO"
+      CELL_DESC="plan=NONE, impl=Opus"
       RUN_ID=$(basename "$ARTIFACTS_DIR")
 
       git push -u origin "$BRANCH"
 
-      BODY="Fixes #${ISSUE_NUM}
+      BODY="Refs #${ISSUE_NUM}
 
       **Benchmark cell:** \`${CELL}\` (${CELL_DESC})
       **Source run-id:** \`${RUN_ID}\`

@@ -1,0 +1,22 @@
+# How often the host looks at origin/main. The script itself is cheap when
+# there is nothing to do: it fetches, compares the remote commit with the last
+# commit it actually deployed, and exits.
+#
+# Install: see the header of virtualagent-deploy.service.
+
+[Unit]
+Description=Check for Virtual Agent deploys every five minutes
+Requires=virtualagent-deploy.service
+
+[Timer]
+# One run shortly after boot, then every five minutes. RandomizedDelaySec keeps
+# a fleet of hosts from fetching in lockstep; Persistent catches up one missed
+# run after the machine was off, not every run it slept through.
+OnBootSec=2min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+Persistent=true
+Unit=virtualagent-deploy.service
+
+[Install]
+WantedBy=timers.target

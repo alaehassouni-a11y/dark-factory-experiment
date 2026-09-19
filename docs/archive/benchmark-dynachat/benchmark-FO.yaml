@@ -1,8 +1,24 @@
-name: benchmark-OF
+# ARCHIVED 2026-09-19. This file is a record, not a runnable workflow.
+#
+# It belongs to the mixed-provider benchmark of DynaChat, the chat/RAG/video product
+# this repository replaced with the Virtual Agent on 2026-09-03. Every path, source
+# file, candidate issue, repository owner and measured number below refers to that
+# product and does not exist any more.
+#
+# Two hazards, if anyone runs it by hand anyway:
+#   1. It runs NONE of this project's checks. No gate, no holdout, no mutation set.
+#      A pull request it opens has been validated by nothing.
+#   2. Its dispatch procedure labels issues factory:in-progress and never releases
+#      them. That is the mechanism that starved the factory from 2026-05 to 2026-08;
+#      the incident is in FACTORY.md.
+#
+# The live workflows are in .archon/workflows/.
+
+name: benchmark-FO
 description: |
-  Benchmark cell: plan=Opus, impl=Fable. Tests whether Fable's edge lives in
-  the IMPLEMENTATION step. See benchmark-OO.yaml for the full design notes. This
-  file differs only in the plan and implement node provider/model overrides + label.
+  Benchmark cell: plan=Fable, impl=Opus. Tests whether Fable's edge lives in
+  the PLANNING step. See benchmark-OO.yaml for the full design notes. This file
+  differs only in the plan and implement node provider/model overrides + label.
 
 provider: claude
 model: sonnet
@@ -68,7 +84,7 @@ nodes:
 
       Prefer minimal, surgical changes. Do NOT execute any edits here.
     provider: claude
-    model: opus
+    model: claude-fable-5
     depends_on: [explore]
     context: fresh
 
@@ -91,7 +107,7 @@ nodes:
          `git add -A && git commit -m "impl: address issue"`
       5. Do NOT push or create a PR.
     provider: claude
-    model: claude-fable-5
+    model: opus
     depends_on: [plan]
     context: fresh
 
@@ -124,13 +140,13 @@ nodes:
       set -euo pipefail
       ISSUE_NUM=$(cat "$ARTIFACTS_DIR/.issue-number")
       BRANCH=$(git branch --show-current)
-      CELL="OF"
-      CELL_DESC="plan=Opus, impl=Fable"
+      CELL="FO"
+      CELL_DESC="plan=Fable, impl=Opus"
       RUN_ID=$(basename "$ARTIFACTS_DIR")
 
       git push -u origin "$BRANCH"
 
-      BODY="Fixes #${ISSUE_NUM}
+      BODY="Refs #${ISSUE_NUM}
 
       **Benchmark cell:** \`${CELL}\` (${CELL_DESC})
       **Source run-id:** \`${RUN_ID}\`

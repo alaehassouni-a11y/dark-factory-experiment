@@ -56,6 +56,13 @@ def _argv(cmd: str) -> list[str]:
     for a tool that is on PATH and works in any terminal.
     """
     parts = shlex.split(cmd, posix=False)
+    # posix=False keeps the quotes ON the token, which is what we want for a
+    # path containing a space and exactly wrong for handing to Popen: it looks
+    # for a file literally named `"C:\...\python.exe"` and reports the same
+    # "cannot find the file specified" as a missing tool. `{python}` is
+    # substituted quoted by ci.py precisely so a space survives the split, so
+    # strip the quotes here, once the splitting is done.
+    parts = [p[1:-1] if len(p) > 1 and p[0] == p[-1] == '"' else p for p in parts]
     if parts:
         found = shutil.which(parts[0])
         if found:
@@ -137,6 +144,16 @@ class HttpApp:
         h.update(headers or {})
         req = urllib.request.Request(self.base + path, data=body.encode("utf-8"),
                                      headers=h, method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.status, r.read().decode("utf-8", "replace"), dict(r.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode("utf-8", "replace"), dict(e.headers)
+
+    def delete(self, path: str, headers: dict | None = None):
+        """(status, body, headers). A resource that can be created and never deleted is
+        half a contract; the journey asserts the 204 and the 404 after it."""
+        req = urllib.request.Request(self.base + path, headers=headers or {}, method="DELETE")
         try:
             with urllib.request.urlopen(req, timeout=15) as r:
                 return r.status, r.read().decode("utf-8", "replace"), dict(r.headers)

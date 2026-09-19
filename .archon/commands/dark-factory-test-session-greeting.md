@@ -35,12 +35,12 @@ Read it from the artifact file:
 1. `curl -sf "$BASE/api/health"` and confirm `"status":"ok"`. If the
    service is down, that is a FAIL (record the curl error).
 2. Open a session with a French hint and capture the status code:
-   `curl -s -o "$ARTIFACTS_DIR/test-chat-ui-session.txt" -w '%{http_code}' -X POST "$BASE/api/sessions" -H 'Content-Type: application/json' -d '{"client_id":"weekly-scenario-1","language_hint":"fr"}'`
+   `curl -s -o "$ARTIFACTS_DIR/test-session-greeting-session.txt" -w '%{http_code}' -X POST "$BASE/api/sessions" -H 'Content-Type: application/json' -d '{"client_id":"weekly-scenario-1","language_hint":"fr"}'`
 3. Assert the status is `201`, the body has a non-empty `session_id` and
    `session_token`, `greeting.text` is non-empty, and
    `greeting.voice_locale` is `fr-FR`. Any miss is a FAIL.
 4. Send the first turn with the bearer token, saving the SSE body:
-   `curl -sN -o "$ARTIFACTS_DIR/test-chat-ui-turn.txt" -w '%{http_code}' -X POST "$BASE/api/sessions/$SESSION_ID/turns" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"text":"Quels sont vos horaires d'"'"'ouverture ?"}'`
+   `curl -sN -o "$ARTIFACTS_DIR/test-session-greeting-turn.txt" -w '%{http_code}' -X POST "$BASE/api/sessions/$SESSION_ID/turns" -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"text":"Quels sont vos horaires d'"'"'ouverture ?"}'`
    Wait up to 60s for the stream to complete (it ends with `data: [DONE]`).
 5. Verify in the saved stream:
    (a) status `200`;
@@ -53,10 +53,10 @@ Read it from the artifact file:
    app could not speak while the answer was being produced.
 6. Read the transcript with the owner's token
    (`GET $BASE/api/sessions/$SESSION_ID`) and save it to
-   `$ARTIFACTS_DIR/test-chat-ui-transcript.txt`; it must list the agent
+   `$ARTIFACTS_DIR/test-session-greeting-transcript.txt`; it must list the agent
    greeting, the client turn and the agent answer.
 7. `curl -s -X DELETE "$BASE/api/sessions/$SESSION_ID" -H "Authorization: Bearer $TOKEN"`
-8. Write a markdown summary to `$ARTIFACTS_DIR/test-chat-ui.md` with:
+8. Write a markdown summary to `$ARTIFACTS_DIR/test-session-greeting.md` with:
     - Pass/fail verdict
     - What you observed (status codes, greeting text and locale, the
       event order of the stream)

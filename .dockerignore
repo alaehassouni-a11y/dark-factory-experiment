@@ -1,0 +1,79 @@
+# What is NOT sent to the Docker daemon when deploy/Dockerfile is built.
+#
+# This file must live HERE, at the repository root, because the build context is
+# the repository root (deploy/docker-compose.yml → build.context: ..). Docker
+# reads only `<context>/.dockerignore`; the copy that used to sit at
+# deploy/.dockerignore was never read by anything, so none of its rules — the
+# `**/.env` one included — had ever taken effect.
+#
+# Matching is Docker's, not the shell's, and the difference bites:
+#   * a single `*` does NOT cross a `/`, so `*.md` hides the repo-root
+#     documents and nothing deeper. That is deliberate below: the wiki IS a
+#     tree of .md files and the image has to carry it, so there is no `**/*.md`
+#     rule anywhere in here.
+#   * `**/x` matches `x` at any depth, including the root.
+#   * a later `!` line re-includes what an earlier line excluded.
+#
+# The image needs exactly two things from this context: app/backend/ (minus its
+# venv, caches and tests) and virtualagent/resources/. Everything listed here is
+# either not one of those, or is a copy of a developer's machine.
+
+# Git and CI metadata
+.git
+.gitattributes
+.gitignore
+.github
+
+# Editors and agent scratch
+.vscode
+.idea
+.claude
+
+# Secrets. Never in an image layer, at any depth. The Dockerfile copies nothing
+# from app/ except app/backend/, but app/.env is one mistyped COPY away and the
+# rule costs nothing.
+**/.env
+**/.env.*
+
+# Python environments and caches. `**/.venv` is the important one: a developer
+# or a deploy host that has run `uv sync` in app/backend has a whole OS-specific
+# interpreter tree there (~111M), and it used to be copied over the Linux venv
+# the image builds. The Dockerfile now also builds its environment at /opt/venv,
+# outside the copied tree, so this is the first of two defences, not the only one.
+**/.venv
+**/venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.coverage
+**/coverage
+**/htmlcov
+
+# The service's own tests and their fixture wiki. They are the gate's business,
+# not production's, and the fixture wiki must never be mistaken for knowledge.
+app/backend/tests
+
+# Nothing else in the repository belongs in the image: the iOS app is built on a
+# Mac, the harness is the gate, tools/ has its own uv projects, and the factory
+# scaffolding is not runtime.
+app/ios
+harness
+tools
+scripts
+docs
+.archon
+.factory
+
+# The deploy files describe the stack from outside the container. The Dockerfile
+# itself is re-included: BuildKit reads it through a separate path, but the
+# legacy builder reads it from the context, and a build that cannot find its own
+# Dockerfile is a confusing way to learn that.
+deploy/*
+!deploy/Dockerfile
+
+# Repo-root governance and documentation. Root level only, by design — see the
+# note about `*` and `/` at the top: the wiki's .md files must survive this file.
+*.md

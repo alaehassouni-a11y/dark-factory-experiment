@@ -32,6 +32,19 @@ locale supports it, otherwise through Apple's servers.
   supported, else `en-US`, until the first `language` event). Listening stops on a second
   tap or after a pause; the transcript is sent as a turn. A text field does the same for
   typed input.
+- **The language table is the service's.** When a session opens, the app fetches
+  `GET /api/languages` once and derives from it the name on the badge, the locale the
+  recogniser starts in and the voice its own phrases are spoken in; it does not map a
+  language to a locale itself (`CLAUDE.md`, Swift conventions). The four codes and one
+  locale each are compiled in (`SupportedLanguage`, `LanguageTable.fallback`) only as the
+  stand-in for the moments before that answer arrives, and for a device that never reaches
+  the service. A `language` or `sentence` event that carries its own `voice_locale` still
+  wins over the table.
+- Everything the client reads or hears - the status line, the errors, the settings sheet,
+  the button labels VoiceOver speaks and the two words under each answer - comes from
+  `Phrases.swift` in all four languages. The permission prompts are localised in
+  `VirtualAgent/{en,fr,de,ar}.lproj/InfoPlist.strings`; `Info.plist` holds the English
+  originals. The product name is not translated.
 - While a turn streams, tokens fill the agent bubble, every `sentence` event is spoken in
   its `voice_locale`, `language` updates the badge and the recogniser for the next turn,
   `sources` appear under the bubble, and `turn` adds a small `kind - source` label.
@@ -47,6 +60,8 @@ locale supports it, otherwise through Apple's servers.
 |---|---|
 | `project.yml` | XcodeGen spec: app target, unit-test target, scheme |
 | `VirtualAgent/Info.plist` | Permissions strings, local-network ATS exception, display name |
+| `VirtualAgent/*.lproj/InfoPlist.strings` | The two permission prompts in the four languages |
+| `VirtualAgent/LanguageTable.swift` | The table from `GET /api/languages`, and the fallback |
 | `VirtualAgent/VirtualAgentApp.swift` | App entry |
 | `VirtualAgent/ContentView.swift` | The single screen plus the settings sheet |
 | `VirtualAgent/SessionViewModel.swift` | Session lifecycle, turns, transcript, language, errors |
@@ -56,7 +71,7 @@ locale supports it, otherwise through Apple's servers.
 | `VirtualAgent/SpeechOutput.swift` | `AVSpeechSynthesizer` wrapper and shared audio-session setup |
 | `VirtualAgent/ClientIdentity.swift` | Persistent `client_id` |
 | `VirtualAgent/Models.swift` | Codable types for every request, response and event |
-| `VirtualAgent/Phrases.swift` | The app's own status and error sentences in the four languages |
+| `VirtualAgent/Phrases.swift` | Every string the client sees or hears, in the four languages |
 | `VirtualAgentTests/SSEParserTests.swift` | Parser and event-decoding tests |
 
 ## Not verified
@@ -66,4 +81,6 @@ Windows machine without Xcode, XcodeGen, or an iOS SDK. Expect to fix at least t
 build: API availability on the iOS 17 SDK, Swift concurrency diagnostics, and XcodeGen
 schema details are the likely places. The unit tests have not been executed either. The
 voice behaviour (silence detection, voice selection, audio-session routing) has not been
-tried on a device.
+tried on a device. In particular, nobody has yet seen XcodeGen turn the four `.lproj`
+folders into a localised resource, or iOS show a permission prompt in French, German or
+Arabic; `harness/static_ios.py` only asserts that `Info.plist` still carries the two keys.

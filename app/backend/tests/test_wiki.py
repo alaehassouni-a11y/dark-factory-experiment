@@ -132,6 +132,22 @@ def test_chunk_document_splits_on_headings_and_keeps_them() -> None:
     assert [c.index for c in chunks] == [0, 1, 2]
 
 
+def test_an_imported_documents_provenance_comment_is_never_a_chunk_of_its_own() -> None:
+    """tools/wiki/ingest.py writes its provenance comment under the `# title`, because the
+    text before the first heading is a section here: a comment on the first line would be
+    chunk 0, pure noise, embedded at every rebuild and competing for the document's
+    excerpt slots (WIKI_MAX_CHUNKS_PER_DOCUMENT is 2)."""
+    header = "<!-- imported from: hours.docx on 2026-09-06 by tools/wiki/ingest.py -->"
+    body = f"# Opening hours\n\n{header}\n\nNine to six.\n\n## Sunday\n\nClosed.\n"
+    chunks = chunk_document("Opening hours", "opening-hours.md", body)
+    assert chunks, "the document still has content"
+    assert not any(c.text.replace("Opening hours", "").strip() == header for c in chunks)
+    assert any("Nine to six." in c.text for c in chunks)
+
+    above = chunk_document("Opening hours", "opening-hours.md", f"{header}\n{body}")
+    assert above[0].text == header, "the shape this format exists to avoid"
+
+
 def test_chunk_document_packs_paragraphs_to_target_size() -> None:
     paragraph = "word " * 100
     body = "\n\n".join([paragraph] * 4)

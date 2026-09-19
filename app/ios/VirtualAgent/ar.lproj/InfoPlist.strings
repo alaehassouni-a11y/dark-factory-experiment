@@ -1,0 +1,3 @@
+/* طلبا الإذن، وهما أول ما تعرضه التطبيق على العميل. اسم المنتج لا يُترجم. */
+"NSMicrophoneUsageDescription" = "يستمع Virtual Agent إلى سؤالك ليتمكن من الإجابة عليك بصوت مسموع.";
+"NSSpeechRecognitionUsageDescription" = "يحوّل Virtual Agent ما تقوله إلى نص لإرساله إلى الوكيل.";

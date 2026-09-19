@@ -36,7 +36,16 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: virtualagent-app:latest
+    # One tag per deployed commit, not a moving `latest`. Both colours used to
+    # share `virtualagent-app:latest` and every `--build` retagged it, so the
+    # colour that was still serving had no image of its own left: the obvious
+    # rollback (`compose up -d app-<old>`) recreated it on the NEW image and
+    # destroyed the thing it was rolling back to. deploy.sh exports
+    # VIRTUALAGENT_IMAGE_TAG=<short sha> for the build it is doing, so the
+    # previous commit's image survives on disk and a rollback has a target.
+    # `latest` when nothing is exported keeps a hand-run `docker compose up`
+    # (first-time setup in deploy/README.md) working as before.
+    image: virtualagent-app:${VIRTUALAGENT_IMAGE_TAG:-latest}
     container_name: virtualagent-app-blue
     restart: unless-stopped
     environment:
@@ -47,9 +56,11 @@ services:
       # second key), Brave when a key is set, none when asked for.
       WEB_SEARCH_PROVIDER: ${WEB_SEARCH_PROVIDER:-}
       BRAVE_SEARCH_API_KEY: ${BRAVE_SEARCH_API_KEY:-}
-      # The wiki copied into the image by deploy/Dockerfile. Fixed, not read
-      # from .env — a host-side path here would let the image and the wiki
-      # drift apart.
+      # Where the service looks for knowledge, inside the container. Fixed, not
+      # read from .env: the image carries a default copy of the repository's
+      # virtualagent/resources/ at this path and the volume below mounts the
+      # host's live wiki read-only over it, so both the mounted and the unmounted
+      # case are the same one path. A host-side path here would let the two drift.
       WIKI_RESOURCES_DIR: /app/virtualagent/resources
       # Optional. Comma-separated browser origins. The iOS app needs none.
       CORS_ORIGINS: ${CORS_ORIGINS:-}
@@ -63,13 +74,31 @@ services:
       # added, changed or removed, so a document is knowledge without a build or a
       # flip. Default: the checkout's own folder, so a host that sets nothing keeps
       # the old behaviour (documents arrive with `git pull`).
-      - ${WIKI_DIR:-../virtualagent/resources}:/app/virtualagent/resources:ro
+      #
+      # Long syntax for one reason: create_host_path: false. The short
+      # `${WIKI_DIR}:/app/...:ro` form asks Docker to CREATE a missing host path,
+      # so a typo in WIKI_DIR, or a disk that failed to mount, produced an empty
+      # directory that mounted cleanly and gave the agent nothing to know. Now
+      # the container refuses to start instead, which is the honest failure and
+      # one the deploy script can see.
+      - type: bind
+        source: ${WIKI_DIR:-../virtualagent/resources}
+        target: /app/virtualagent/resources
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
+      # Reads the health JSON; a 200 is not the question. A wiki this uid cannot
+      # read, or one that is there but empty, still answers `status: ok` with
+      # wiki_documents: 0 — a colour that would go live and send every client to
+      # the web, inverting the product's first rule behind a green check.
+      # Requiring at least one indexed document is the same bar harness/e2e.py
+      # holds the gate to.
       test:
         - "CMD"
         - "python"
         - "-c"
-        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"
+        - "import json,urllib.request,sys; h=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)); sys.exit(0 if h.get('wiki_documents', 0) >= 1 else 1)"
       interval: 10s
       timeout: 5s
       start_period: 30s
@@ -79,7 +108,9 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: virtualagent-app:latest
+    # Same tag rule as app-blue: per-commit, so the colour that is still serving
+    # keeps an image of its own to roll back to.
+    image: virtualagent-app:${VIRTUALAGENT_IMAGE_TAG:-latest}
     container_name: virtualagent-app-green
     restart: unless-stopped
     environment:
@@ -90,13 +121,20 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-}
       CHAT_MODEL: ${CHAT_MODEL:-anthropic/claude-sonnet-4.6}
     volumes:
-      - ${WIKI_DIR:-../virtualagent/resources}:/app/virtualagent/resources:ro
+      # Identical to app-blue, including create_host_path: false — see there.
+      - type: bind
+        source: ${WIKI_DIR:-../virtualagent/resources}
+        target: /app/virtualagent/resources
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
+      # Identical to app-blue: the health JSON must report an indexed wiki.
       test:
         - "CMD"
         - "python"
         - "-c"
-        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"
+        - "import json,urllib.request,sys; h=json.load(urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)); sys.exit(0 if h.get('wiki_documents', 0) >= 1 else 1)"
       interval: 10s
       timeout: 5s
       start_period: 30s

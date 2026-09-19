@@ -17,8 +17,8 @@ Virtual Agent service (stub providers, fixture wiki). Your job: read their outpu
 aggregate report.
 
 Read all files matching `$ARTIFACTS_DIR/test-*.md` (there should be 4:
-`test-chat-ui.md`, `test-video-ingestion.md`, `test-rag-response.md`,
-`test-conversation-history.md`).
+`test-session-greeting.md`, `test-wiki-coverage.md`, `test-web-fallback.md`,
+`test-language-privacy.md`).
 
 ---
 

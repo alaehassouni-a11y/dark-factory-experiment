@@ -8,6 +8,10 @@ parses both counts, because `ci.py` refuses a run that reports zero tests - a su
 discovered nothing exits 0 and looks perfect. The iOS app's XCTest target is NOT run here:
 there is no Swift toolchain on the gate's machines, and the counts below are the service's
 and the tool's. Saying so is the point.
+
+Both `uv run` invocations carry `--all-extras`: pytest lives in each project's
+`[project.optional-dependencies].dev`, which a plain `uv run` never installs, so in a
+fresh worktree this rung died on `Failed to spawn: pytest` and the gate blamed the PR.
 """
 from __future__ import annotations
 
@@ -17,6 +21,11 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+if hasattr(sys.stdout, "reconfigure"):
+    # test_languages.py carries Arabic; under a file redirect on Windows stdout is cp1252
+    # and printing a failing suite's output raises UnicodeEncodeError, losing the failure.
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
 ROOT = Path(__file__).resolve().parent.parent
 BACKEND = ROOT / "app" / "backend"
@@ -35,7 +44,8 @@ def run_suite(label: str, cwd: Path) -> int | None:
     env = dict(os.environ)
     env.pop("VIRTUAL_ENV", None)
     try:
-        p = subprocess.run([UV, "run", "pytest", "tests", "-q", "-p", "no:cacheprovider"],
+        p = subprocess.run([UV, "run", "--all-extras", "pytest", "tests", "-q",
+                            "-p", "no:cacheprovider"],
                            cwd=cwd, env=env, capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=900)
     except FileNotFoundError:
