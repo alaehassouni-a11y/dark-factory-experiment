@@ -1,3 +1,9 @@
+# NO PRODUCT (2026-09-27): this repository specifies no product right now. The Virtual
+# Agent this workflow was written against moved to alaehassouni-a11y/firstRepo, so the
+# paths, commands and prompts below that name `app/backend`, `tools/wiki`, `harness/`,
+# `docs/API.md` and the Virtual Agent itself are a worked example, kept until a new
+# product re-points them. Steps that would touch a missing product folder skip with a
+# message instead of failing.
 name: dark-factory-triage
 description: |
   Use when: Orchestrator needs to batch-classify untriaged GitHub issues for the Dark Factory experiment.
@@ -171,7 +177,7 @@ nodes:
       # one question. The classifier needs it in front of it to obey §1's
       # "open PRD question, unless decisions.md records the answer".
       echo "=== .factory/decisions.md ==="
-      cat .factory/decisions.md
+      cat .factory/decisions.md 2>/dev/null || echo "(no decision log: no product is currently specified)"
     timeout: 10000
 
   - id: fetch-open-prs

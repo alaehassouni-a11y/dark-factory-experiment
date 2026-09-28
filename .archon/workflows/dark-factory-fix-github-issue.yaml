@@ -1,3 +1,9 @@
+# NO PRODUCT (2026-09-27): this repository specifies no product right now. The Virtual
+# Agent this workflow was written against moved to alaehassouni-a11y/firstRepo, so the
+# paths, commands and prompts below that name `app/backend`, `tools/wiki`, `harness/`,
+# `docs/API.md` and the Virtual Agent itself are a worked example, kept until a new
+# product re-points them. Steps that would touch a missing product folder skip with a
+# message instead of failing.
 name: dark-factory-fix-github-issue
 description: |
   Use when: Dark Factory orchestrator wants to implement an accepted issue in the
@@ -197,9 +203,6 @@ nodes:
         echo "WARNING: $LIST is missing; falling back to the hardcoded core set" >&2
         for f in $CHANGED; do
           case "$f" in
-            app/backend/auth.py|app/backend/rate_limit.py|app/backend/languages.py|\
-            app/backend/config.py|app/backend/main.py|app/backend/llm/openrouter.py|\
-            app/backend/agent/pipeline.py|app/backend/routes/sessions.py|\
             harness/*|.factory/*|deploy/*|.github/*|MISSION.md|FACTORY_RULES.md|CLAUDE.md)
               VIOLATION="$VIOLATION $f" ;;
           esac

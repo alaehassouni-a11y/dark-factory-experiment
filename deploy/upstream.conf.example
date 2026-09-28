@@ -1,1 +1,0 @@
-reverse_proxy app-blue:8000

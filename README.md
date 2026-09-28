@@ -1,15 +1,31 @@
-# The Dark Factory Experiment (Virtual Agent)
+# The Dark Factory Experiment
 
-**A public Dark Factory experiment.** This repository is a working product that is built, reviewed, and merged almost entirely by AI coding agents. Humans do one thing: file issues. Everything after that - triage, implementation, code review, testing, merging - is handled by Archon workflows running on a cron, and the deploy happens on its own: there is no release branch and no promotion step, so a merge to `main` is picked up by a systemd timer on the VPS and swapped into production within one tick. The brake is a hold file on the host (`/opt/virtualagent/.hold`): with it in place the new commit is still built and health-checked on the inactive colour but no traffic is sent to it until a person flips. That is a human reaching for a lever, not a checkpoint every change passes through.
+**A public Dark Factory experiment.** This repository is a factory that is built, reviewed,
+and merged almost entirely by AI coding agents, aimed at whatever product `requirements.md`
+currently names. Humans do one thing: file issues. Everything after that - triage,
+implementation, code review, testing, merging - is handled by Archon workflows running on a
+cron. Deploy is product-specific and lives with the product, not in this repository's
+factory scaffolding.
 
-Two honest caveats, because they are the design and not an asterisk. This runs at **level 4, not level 5**: the factory does not write its own issues. And there is a deliberate **human-authored perimeter** it is never allowed to touch - the session token check, the daily turn cap, the language set, the deploy configs, the holdout, the ratchet, and the three governance files that define its own rules. The list is in `FACTORY_RULES.md` §5, with `.factory/protected-paths.txt` as its machine-readable twin - the file the validator actually matches a PR's changed files against - and a PR touching any of it is auto-rejected before anything else is evaluated. An autonomous system is only as trustworthy as the things it cannot change about itself.
-
-The product itself is the **Virtual Agent**: a spoken assistant for a business's clients. A client opens an iPhone app, speaks or types in French, English, German or Arabic, and the agent answers aloud in that language, live, from a wiki built out of the `virtualagent/resources` folder in this repository. When the wiki does not cover the question the agent searches the web and says so. When neither does, it says it does not know. But the *real* point of this repo is the factory that builds it.
+Two honest caveats, because they are the design and not an asterisk. This runs at **level 4,
+not level 5**: the factory does not write its own issues. And there is a deliberate
+**human-authored perimeter** it is never allowed to touch - the invariants of whichever
+product is current, and the three governance files that define its own rules. The list is in
+`FACTORY_RULES.md` §5, with `.factory/protected-paths.txt` as its machine-readable twin - the
+file the validator actually matches a PR's changed files against - and a PR touching any of
+it is auto-rejected before anything else is evaluated. An autonomous system is only as
+trustworthy as the things it cannot change about itself.
 
 > **History.** Until 2026-09-03 this repository built DynaChat, a RAG chat interface over a
 > YouTube channel's transcripts. The product was replaced in place from a four-sentence
-> requirement (`requirements.md`); the factory, its rules and its incident log carried
-> over. The old application is in git history, not in the tree.
+> requirement (`requirements.md`); the factory, its rules and its incident log carried over.
+> The old application is in git history, not in the tree.
+>
+> From 2026-09-03 to 2026-09-27 the product was the **Virtual Agent**, a multilingual
+> push-to-talk voice assistant. It moved to `alaehassouni-a11y/firstRepo` on 2026-09-27,
+> together with its product harness (https://github.com/alaehassouni-a11y/firstRepo/pull/54),
+> and no product currently lives here. `requirements.md` is the placeholder; the sections
+> below describe the factory that will build whatever comes next.
 
 ---
 
@@ -52,24 +68,16 @@ A mixed-provider benchmark once measured that rather than assuming it - a matrix
                        │
                        ▼
                 ┌─────────────┐
-                │    main     │  AI-managed branch, and the deploy ref
-                └──────┬──────┘
-                       │  deploy timer on the VPS, next tick
-                       ▼
-                ┌─────────────────────────────┐
-                │  build inactive colour      │
-                │  healthcheck (wiki indexed) │
-                │  flip Caddy ─► production   │
-                └─────────────────────────────┘
-                   the brake: `/opt/virtualagent/.hold` on the host
-                   stops the flip — built and health-checked, not
-                   live, until a person removes it and flips
+                │    main     │  AI-managed branch
+                └─────────────┘
+                   deploy, if any, is defined by the current product,
+                   under its own deploy/ folder — none exists right now
 ```
 
-**There is no release branch and no promotion step.** A merged PR is in front of clients
-on the next timer tick, and the only thing between the two is the Docker healthcheck,
-which passes when the process answers `/api/health` with its wiki indexed. `FACTORY.md`
-says what that does and does not prove.
+**There is no release branch and no promotion step in the factory itself.** A merged PR is
+the end state the factory guarantees; whatever a product's own deploy configuration does
+with `main` from there is that product's concern, described in its own docs when a product
+exists. `FACTORY.md` says what the gate does and does not prove.
 
 ### Labels are the state machine
 
@@ -85,7 +93,7 @@ The orchestrator does not hold state itself. It reads GitHub labels and decides 
 
 These come from research on every prior Dark Factory attempt (StrongDM, Spotify Honk, Steve Yegge's Gas Town) and the failure modes they hit:
 
-1. **The validator never reads the implementation plan.** It checks the *outcome* against the *issue*, not the approach. This is StrongDM's "holdout" pattern - it's what stops an agent from gaming its own acceptance criteria. Above that sits a second holdout the builder cannot even read: `.factory/holdout/run.py`, written from the PRD before the code existed.
+1. **The validator never reads the implementation plan.** It checks the *outcome* against the *issue*, not the approach. This is StrongDM's "holdout" pattern - it's what stops an agent from gaming its own acceptance criteria. Above that sits a second holdout the builder cannot even read: a product's `.factory/holdout/run.py`, written from its PRD before the code exists. No product is current, so no holdout exists right now; the next one adds its own.
 2. **Triage has only two verdicts: accept or reject.** No "needs human" inbox. If a human disagrees with a rejection, they reopen with more context and the next triage cycle picks it up fresh.
 3. **Governance files (`MISSION.md`, `FACTORY_RULES.md`, `CLAUDE.md`) can never be modified by the factory.** The security review hard-fails any PR that touches them. The agent cannot amend the rules it is judged by.
 4. **The dispatcher is dumb on purpose.** Pure bash on a 30-minute cron, reading GitHub labels as the only shared state - no database, no message bus, no LLM deciding what to run. An earlier version asked a model what to dispatch and it hallucinated runs for work that did not exist. It dispatches up to `MAX_PARALLEL=4` workflows, in a fixed priority order: validate a PR, implement an issue, triage. Finishing in-flight work before starting new work is load-bearing - reversed, the factory triages forever while its own PRs rot.
@@ -112,18 +120,19 @@ The mixed-provider benchmark suite is archived in [`docs/archive/benchmark-dynac
 
 ### The gate
 
-`python harness/ci.py` is the one entrypoint that decides whether a build is good, and
-`FACTORY.md` is the honest account of what it does and does not cover. In short: static
-checks, the unit suite, the API journey from `FACTORY_RULES.md` §4 against a live
-process with stub providers, the holdout scenarios the builder cannot read, and a
-mutation set that breaks the product on purpose and requires the gate to notice.
-`.factory/locks/floor.json` is the ratchet: the numbers the gate must at least reach,
-raised only by human commits.
+`python harness/ci.py` is the one entrypoint a product wires up to decide whether a build is
+good, and `FACTORY.md` is the honest account of what it does and does not cover: static
+checks, the unit suite, an API journey against a live process with stub providers, the
+holdout scenarios the builder cannot read, and a mutation set that breaks the product on
+purpose and requires the gate to notice. `.factory/locks/floor.json` is the ratchet: the
+numbers the gate must at least reach, raised only by human commits.
 
-The same gate also runs on GitHub, in `.github/workflows/gate.yml`: `harness/ci.py --quick`
-on every pull request and on every push to `main`, plus the full gate as a second job that
-is allowed to fail. It needs no secrets, because the journey, the holdout and the mutation
-set all run against the stubs.
+No product currently supplies `harness/` or a floor, so there is nothing for the gate to run.
+`.github/workflows/gate.yml` detects that and reports `GATE_SKIPPED no harness/ci.py -
+no product is currently specified (see requirements.md)` rather than failing every PR; the
+mechanism - `harness/ci.py --quick` on every pull request and push to `main`, plus the full
+gate as a second, allowed-to-fail job - resumes the moment a product adds its own
+`harness/ci.py`.
 
 ### Making the gate binding
 
@@ -162,109 +171,22 @@ which is human-authored.
 
 ## The Product
 
-What the factory is actually building. The requirement is four sentences in
-[`requirements.md`](requirements.md); the PRD written from them is
-[`docs/virtualagent.prd.md`](docs/virtualagent.prd.md); `MISSION.md` is that PRD
-compressed to what the factory has to obey.
-
-### Architecture
-
-```
-┌──────────────────────┐      HTTPS /api/*      ┌──────────────────────────────┐
-│    iPhone app        │ ─────────────────────► │      Service (FastAPI)       │
-│  SwiftUI, iOS 17+    │                        │                              │
-│                      │  ◄── SSE: language,    │  detect language             │
-│  SFSpeechRecognizer  │      tokens, sentence, │      │                       │
-│  AVSpeechSynthesizer │      sources, turn     │  wiki index ── BM25 + cosine │
-│                      │                        │      │        (RRF fused)    │
-└──────────────────────┘                        │  confident? ── yes ─► compose│
-                                                │      │ no                    │
-                                                │  web search (Sonar) ► compose│
-                                                │      │ none                  │
-                                                │  "I do not know", source none│
-                                                │                              │
-                                                │  model: Claude Sonnet via    │
-                                                │  OpenRouter, streamed and    │
-                                                │  split into sentences        │
-                                                └──────────────────────────────┘
-                                                        ▲
-                                          the wiki folder: *.md, *.txt
-                                          (indexed at startup, watched for changes)
-```
-
-- **Client:** a native SwiftUI iPhone app under `app/ios/`, no third-party dependencies. The device does the listening and the speaking; the service decides what is said and in which voice locale.
-- **Service:** one Python 3.11 FastAPI process under `app/backend/`, managed with `uv`. No database: sessions and the daily turn counter live in process.
-- **Wiki:** every `.md` and `.txt` file in the wiki folder, `virtualagent/resources/` by default, chunked and indexed at startup and re-indexed within seconds whenever a file is added, changed or removed (BM25 over words plus cosine over embeddings, fused with reciprocal rank fusion). Adding a file to the folder is the only way the wiki grows; `tools/wiki/ingest.py` turns Word, PDF, HTML and spreadsheets into files for it.
-- **Inference:** OpenRouter only - `anthropic/claude-sonnet-4.6` for answers, `openai/text-embedding-3-small` for the index.
-- **Web fallback:** only when the wiki has no confident answer. Perplexity Sonar through OpenRouter by default: it searches, answers, and names the pages it used, which become the turn's sources. Brave Search is the alternative when a Brave key is set.
-- **API:** documented in [`docs/API.md`](docs/API.md). Every agent turn streams as Server-Sent Events: the detected language first, then tokens, a `sentence` event each time one completes (the app speaks it immediately), the sources, and a closing `turn` that declares `wiki`, `web` or `none`.
-
-### What cannot change
-
-`MISSION.md` lists the hard invariants; the short version is that the supported languages are exactly French, English, German and Arabic, the wiki is always consulted before the web, every turn declares its source, a session is private to the client that opened it, the cap is 100 turns per client per day, and OpenRouter is the only provider.
+**No product is currently specified.** The Virtual Agent - a multilingual push-to-talk voice
+assistant, previously described here in full - moved to `alaehassouni-a11y/firstRepo` on
+2026-09-27 along with its product harness
+(https://github.com/alaehassouni-a11y/firstRepo/pull/54). `requirements.md` is a placeholder
+and `MISSION.md` no longer names product invariants; a new product starts by writing its
+requirements, then its harness under `harness/`, then its own PRD and mission invariants,
+following the shape the Virtual Agent had (visible in firstRepo's history if a reference is
+useful).
 
 ---
 
 ## Quick Start
 
-### Prerequisites
-
-- Python 3.11+ and [uv](https://docs.astral.sh/uv/)
-- An [OpenRouter](https://openrouter.ai) API key
-- Optional: a [Brave Search](https://brave.com/search/api/) API key, if you prefer Brave to Perplexity for the web fallback
-- For the app: a Mac with Xcode 15+ and [XcodeGen](https://github.com/yonaskolb/XcodeGen)
-
-### Run the service
-
-1. Create `app/.env` (gitignored) from `app/backend/.env.example`. The minimum is an `OPENROUTER_API_KEY`.
-
-2. Install and start:
-
-```bash
-cd app/backend && uv sync --all-extras
-```
-
-```bash
-cd app && uv --project backend run uvicorn backend.main:app --reload --port 8000
-```
-
-The service indexes `virtualagent/resources` at startup and refuses to start if it cannot. Check it with:
-
-```bash
-curl http://localhost:8000/api/health
-```
-
-3. Talk to it without the app, straight from the API:
-
-```bash
-curl -s -X POST http://localhost:8000/api/sessions -H 'Content-Type: application/json' -d '{"client_id":"me","language_hint":"fr"}'
-```
-
-Then send a turn with the returned token as a bearer token and watch the stream (see `docs/API.md`).
-
-Or use the developer console, a single static page that types or listens, streams the answer, speaks each sentence as it arrives and shows every turn's source. Serve it on a fixed origin and allow that origin on the service:
-
-```bash
-python -m http.server 8080 --directory tools/dev-console
-```
-
-with `CORS_ORIGINS=http://localhost:8080` in `app/.env`, then open http://localhost:8080. It is a tool for people testing the service, not a client of the product; the iOS app remains the only client.
-
-### Run the app
-
-See [`app/ios/README.md`](app/ios/README.md): `xcodegen generate`, open the project, run on a simulator or an iPhone pointed at the service's LAN address. The app has not yet been compiled on a Mac; expect to fix the first build.
-
-### Checks
-
-```bash
-python harness/ci.py --quick
-```
-
-runs static checks and the unit suite. `python harness/ci.py` is the whole gate, including the API journey against a live service with stub providers, the holdout and the mutation set; it needs no secrets. The individual tools, from `app/backend/`:
-
-```bash
-uv run ruff check . && uv run ruff format --check . && uv run mypy . && uv run pytest
-```
+There is nothing product-specific to run right now. The factory scaffolding itself needs
+only [uv](https://docs.astral.sh/uv/) and `gh`; a product adds its own prerequisites,
+service, and checks under its own README section here once one exists.
 
 ---
 
@@ -272,6 +194,6 @@ uv run ruff check . && uv run ruff format --check . && uv run mypy . && uv run p
 
 You contribute to this repo the same way the factory does: **file an issue.** Don't open a PR - the factory will. If your issue is well-scoped and in line with `MISSION.md`, the next triage cycle will accept it, and a workflow run will open the implementing PR. If it gets rejected, read the comment, sharpen the issue, and reopen.
 
-To teach the agent something, put a document in the wiki folder; the running service picks it up within seconds. `tools/wiki/ingest.py` converts Word, PDF, HTML and spreadsheets into the folder's format. In this repository `virtualagent/resources/` holds the default wiki and the samples; in production the folder lives on the host.
+With no product specified, the most useful issue right now is a new `requirements.md`.
 
 That's the whole point of the experiment.
