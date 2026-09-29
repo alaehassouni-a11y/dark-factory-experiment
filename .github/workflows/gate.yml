@@ -3,16 +3,21 @@
 # This is the same ladder the factory runs (`harness/ci.py`), run a second time on
 # GitHub's own machines, so that a merge from the web UI or a direct push to main is
 # checked by something outside the factory's orchestrator. It needs no secrets: the
-# journey, the holdout and the mutation set all run against `harness/stubs.py`.
+# journey, the holdout and the mutation set all run against a product's stub providers.
 #
 # IMPORTANT: this file only produces a check. It does not block anything until a human
 # switches on a ruleset that requires it - see README.md "Making the gate binding" and
 # FACTORY_RULES.md section 3. Until then a red `quick gate` is information, not a stop.
 #
-# Working directory: every rung is run from the repository root. `harness/static.py` and
-# `harness/unit.py` each `cd` into `app/backend` and `tools/wiki` themselves and carry
-# `--all-extras` on every `uv run`, so the two `uv sync` steps below are only a warm
-# cache, never the thing that makes the rungs work.
+# NO PRODUCT: since 2026-09-27 this repository specifies no product (see requirements.md),
+# so there is no `harness/ci.py`. Every job first checks for it and, when it is absent,
+# prints `GATE_SKIPPED` and passes without running anything. The mechanism below is kept
+# for the next product: once it adds `harness/ci.py`, the steps run as before.
+#
+# Working directory: every rung is run from the repository root. A product's
+# `harness/static.py` and `harness/unit.py` are expected to `cd` into the product's own
+# folders themselves and carry `--all-extras` on every `uv run`, so any `uv sync` step a
+# product adds is only a warm cache, never the thing that makes the rungs work.
 
 name: gate
 
@@ -36,25 +41,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Detect a product harness
+        id: harness
+        run: |
+          if [ -f harness/ci.py ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "GATE_SKIPPED no harness/ci.py - no product is currently specified (see requirements.md)"
+            echo "::notice title=gate skipped::No product is currently specified; no harness/ci.py to run."
+          fi
+
       - name: Install uv
+        if: steps.harness.outputs.present == 'true'
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
 
       - name: Use Python 3.11
+        if: steps.harness.outputs.present == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Sync the service's environment
-        run: uv sync --all-extras
-        working-directory: app/backend
-
-      - name: Sync the wiki tool's environment
-        run: uv sync --all-extras
-        working-directory: tools/wiki
-
       - name: python harness/ci.py --quick
+        if: steps.harness.outputs.present == 'true'
         run: python harness/ci.py --quick
 
   full:
@@ -68,23 +79,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Detect a product harness
+        id: harness
+        run: |
+          if [ -f harness/ci.py ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "GATE_SKIPPED no harness/ci.py - no product is currently specified (see requirements.md)"
+            echo "::notice title=gate skipped::No product is currently specified; no harness/ci.py to run."
+          fi
+
       - name: Install uv
+        if: steps.harness.outputs.present == 'true'
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
 
       - name: Use Python 3.11
+        if: steps.harness.outputs.present == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Sync the service's environment
-        run: uv sync --all-extras
-        working-directory: app/backend
-
-      - name: Sync the wiki tool's environment
-        run: uv sync --all-extras
-        working-directory: tools/wiki
-
       - name: python harness/ci.py
+        if: steps.harness.outputs.present == 'true'
         run: python harness/ci.py

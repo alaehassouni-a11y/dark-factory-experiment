@@ -35,7 +35,7 @@ Fixes #
 <!-- Every PR must pass the full API-level journey against a running service.
      Confirm you ran it locally (or note that the validator will run it). -->
 
-- [ ] python harness/ci.py passes (static → unit → the API journey in FACTORY_RULES.md §4 → holdout → mutations)
+- [ ] the product's gate passes (`python harness/ci.py`, if the product supplies one: static → unit → the API journey in FACTORY_RULES.md §4 → holdout → mutations)
 
 ## Dependencies
 
@@ -51,9 +51,9 @@ Fixes #
 ## Governance / protected files
 
 <!-- Confirm the PR does NOT modify any of: MISSION.md, FACTORY_RULES.md,
-     CLAUDE.md, docs/virtualagent.prd.md, .github/**, deploy/**, harness/**,
-     .factory/**, .env*, .archon/config.yaml, auth.py, rate_limit.py, or the
-     language-set definitions in languages.py.
+     CLAUDE.md, the product PRD, .github/**, deploy/**, harness/**,
+     .factory/**, .env*, .archon/config.yaml, or the invariant-bearing files
+     .factory/protected-paths.txt lists for the current product.
      Any PR touching these is auto-rejected. -->
 
 - [ ] No protected files modified

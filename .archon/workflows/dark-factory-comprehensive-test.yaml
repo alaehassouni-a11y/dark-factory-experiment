@@ -1,3 +1,9 @@
+# NO PRODUCT (2026-09-27): this repository specifies no product right now. The Virtual
+# Agent this workflow was written against moved to alaehassouni-a11y/firstRepo, so the
+# paths, commands and prompts below that name `app/backend`, `tools/wiki`, `harness/`,
+# `docs/API.md` and the Virtual Agent itself are a worked example, kept until a new
+# product re-points them. Steps that would touch a missing product folder skip with a
+# message instead of failing.
 name: dark-factory-comprehensive-test
 description: |
   Use when: Weekly cron fires a full end-to-end regression against `main` of
@@ -112,13 +118,13 @@ nodes:
       set -euo pipefail
       export PATH="$HOME/.local/bin:$PATH"
       echo "=== Backend deps (uv sync) ==="
-      (cd app/backend && uv sync --all-extras 2>&1 | tail -10)
+      if [ -d app/backend ]; then (cd app/backend && uv sync --all-extras 2>&1 | tail -10); else echo 'SKIPPED no app/backend - no product is currently specified'; fi
       echo "=== Wiki import tool deps (uv sync) ==="
       # tools/wiki is a second uv project and the static and unit rungs lint
       # and test it too. Its ruff and pytest live in its `dev` extra, which a
       # bare `uv run` never installs: on a fresh worktree that made rung 1
       # fail with "Failed to spawn: ruff" and misrouted every PR.
-      (cd tools/wiki && uv sync --all-extras 2>&1 | tail -10)
+      if [ -d tools/wiki ]; then (cd tools/wiki && uv sync --all-extras 2>&1 | tail -10); else echo 'SKIPPED no tools/wiki - no product is currently specified'; fi
     depends_on: [pull-latest]
     idle_timeout: 300000
 

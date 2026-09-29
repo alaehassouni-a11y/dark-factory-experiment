@@ -21,7 +21,7 @@
 MISSION.md
 FACTORY_RULES.md
 CLAUDE.md
-docs/virtualagent.prd.md
+docs/*.prd.md
 
 # ── The judge: a builder that can edit its checks can pass them ───────
 harness/**
@@ -58,22 +58,3 @@ docker-compose*.yml
 **/.env.*
 **/secrets.*
 **/credentials.*
-
-# ── Invariant-bearing code (CLAUDE.md §The Contract That Must Not Regress)
-app/backend/auth.py
-app/backend/rate_limit.py
-app/backend/main.py
-app/backend/config.py
-app/backend/llm/openrouter.py
-app/backend/routes/sessions.py
-
-# Partially protected: the named definitions are the invariant, the rest of
-# the file is an allowed evolution, so these go to the reviewers rather than
-# straight to reject. languages.py — SUPPORTED_LANGUAGES, LANGUAGE_NAMES and
-# VOICE_LOCALES (detection below them may evolve). pipeline.py — the order in
-# Agent.respond() and the source assignment in _compose() (the confidence
-# decision it calls, in wiki/index.py, is an allowed evolution and is listed
-# here only so a reviewer looks at it alongside pipeline.py).
-?app/backend/languages.py
-?app/backend/agent/pipeline.py
-?app/backend/wiki/index.py

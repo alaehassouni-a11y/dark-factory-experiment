@@ -33,7 +33,7 @@ Dockerfile text eol=lf
 *.dockerfile text eol=lf
 
 # systemd unit files are parsed by systemd on the Linux host; CRLF causes
-# "Failed to parse" at install time. deploy/ holds the deploy service, its
-# timer and the failure-alert unit.
+# "Failed to parse" at install time. a product's deploy/ folder holds its
+# deploy service, timer and failure-alert unit.
 *.service text eol=lf
 *.timer text eol=lf

@@ -11,15 +11,15 @@ body:
     id: problem
     attributes:
       label: Problem or user need
-      description: What is the client trying to do that they currently can't?
-      placeholder: "When the wiki has nothing on a question, the agent searches the web even though I'd rather it told me it doesn't know."
+      description: What is the user trying to do that they currently can't?
+      placeholder: "Describe the need in the user's terms."
     validations:
       required: true
   - type: textarea
     id: proposal
     attributes:
       label: Proposed behavior
-      description: Describe the feature as a client would experience it. What do they say to the agent? What does the agent say back, in which language, and from which source?
+      description: Describe the feature as a user would experience it.
     validations:
       required: true
   - type: textarea
@@ -33,10 +33,8 @@ body:
     id: acceptance
     attributes:
       label: Acceptance criteria
-      description: How will you know this is done? List concrete, checkable conditions the API-level journey (open a session, post turns, read the transcript) can verify without a phone.
+      description: How will you know this is done? List concrete, checkable conditions the API-level journey can verify.
       placeholder: |
-        - A turn asked in French about a topic the wiki covers is answered in French with source "wiki" and the document name
-        - A turn about a topic neither the wiki nor the web covers returns source "none" and an "I don't know" in the client's language
-        - A second client's token is rejected with 401 when it tries to read the first client's session
+        - Given a specific input, the product returns a specific, checkable output
     validations:
       required: true

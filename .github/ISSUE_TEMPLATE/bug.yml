@@ -1,5 +1,5 @@
 name: Bug report
-description: Report something broken in the Virtual Agent
+description: Report something broken in the current product
 title: "[Bug]: "
 labels: []
 body:
@@ -12,7 +12,7 @@ body:
     attributes:
       label: What happened?
       description: A clear, specific description of the buggy behavior.
-      placeholder: "When I ask in German, the answer is spoken in English."
+      placeholder: "Describe what you did and what went wrong."
     validations:
       required: true
   - type: textarea
@@ -20,34 +20,33 @@ body:
     attributes:
       label: Expected behavior
       description: What should have happened instead?
-      placeholder: "The agent answers in the language I spoke, and the turn's source says where the answer came from (wiki, web, or none)."
+      placeholder: "Describe the behavior you expected."
     validations:
       required: true
   - type: textarea
     id: repro
     attributes:
       label: Steps to reproduce
-      description: Ordered list of steps. The factory's regression test must be able to reproduce this against the API (POST /api/sessions, then POST /api/sessions/{id}/turns), so include the exact question and language.
+      description: Ordered list of steps. The factory's regression test must be able to reproduce this against the product's API, so include the exact inputs.
       placeholder: |
-        1. Open the app, tap the microphone, say "Wie lange dauert die Lieferung?"
-        2. Wait for the spoken answer
-        3. Observe the answer is spoken in English and the transcript shows source "web"
-        4. The wiki document "shipping.md" covers this question
+        1. The exact request or input
+        2. What you observed
+        3. What you expected instead
     validations:
       required: true
   - type: textarea
     id: environment
     attributes:
       label: Environment
-      description: iPhone model, iOS version, app version (Settings → About), and the language you spoke.
-      placeholder: "iPhone 15, iOS 19.1, app 0.1.0, German"
+      description: Product version, operating system, and anything else relevant to reproducing the problem.
+      placeholder: "Product 0.1.0, Linux"
     validations:
       required: false
   - type: textarea
     id: logs
     attributes:
       label: Error messages or logs
-      description: Paste any error shown in the app, the session id and turn from the transcript, or lines from the server log (docker logs virtualagent-app-blue).
+      description: Paste any error shown to the user or lines from the service log.
       render: shell
     validations:
       required: false

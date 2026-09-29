@@ -7,24 +7,25 @@
 -->
 
 **Current autonomy level: 4** - an untriaged issue is classified, planned, built,
-reviewed, independently validated, **merged** and **deployed** with no human in the chain.
-A person files the issues. There is no promotion step and no release branch: the deploy
-timer on the VPS polls `main`, and a merged PR is serving clients on the next tick. The
-only brake is a hold file on the host (`/opt/virtualagent/.hold`), which holds the new
-colour built and health-checked but not live until a person flips it - a lever somebody
-reaches for, not a checkpoint every change passes through.
+reviewed, independently validated and **merged** with no human in the chain. A person
+files the issues. Deployment, when a product has one, is that product's own concern
+(see its own `deploy/`); the factory itself defines no deploy step.
 **Level 5 is deliberately not the goal.** The factory does not write its own issues.
 **Stop button:** `.factory-stop` in the orchestrator's working copy (works with the
 network down) **and** the `factory:stop` label on any open issue (reachable from a
 phone). Both fail closed. Checked by `scripts/factory-stop.sh` before anything else is
 read. Tested on purpose, both directions, 2026-08-12.
-**Built from PRD:** [`docs/virtualagent.prd.md`](docs/virtualagent.prd.md), itself
-written from the four sentences in [`requirements.md`](requirements.md) - `MISSION.md`
-is its compression. **Change one, change both**, in the same commit. Nothing warns you:
-the factory will keep faithfully building the old scope until someone notices.
-**Product replaced 2026-09-03.** Until then this factory built DynaChat, a RAG chat over
-a YouTube channel. The factory, its rules and its incident log carried over; the
-application did not. Every number below was re-measured against the new product.
+**No product is currently specified.** `requirements.md` is a placeholder; `MISSION.md`
+names no product invariants. The rest of this document describes the factory mechanics
+that hold regardless of product; the numbers below (components table row 5, the gates,
+the end-to-end path, "Component 5, stated honestly") describe how the Virtual Agent, the
+product built here until 2026-09-27, exercised them - kept as a worked example, not a
+current measurement, until a new product re-measures them. The Virtual Agent itself moved
+to `alaehassouni-a11y/firstRepo` (https://github.com/alaehassouni-a11y/firstRepo/pull/54).
+**Product replaced 2026-09-03, then removed 2026-09-27.** Until 2026-09-03 this factory
+built DynaChat, a RAG chat over a YouTube channel; from then until 2026-09-27, the Virtual
+Agent. The factory, its rules and its incident log carry over across every product change;
+the application never does.
 
 ## The five components, as built here
 
@@ -32,9 +33,9 @@ application did not. Every number below was re-measured against the new product.
 |---|---|---|
 | 1 | Workflow-driven repo | **Archon**, four YAML workflows in `.archon/workflows/`. State in GitHub labels |
 | 2 | The trigger | Pure-bash orchestrator on the VPS at `/opt/dark-factory/orchestrator.sh`, cron every 30 min, `MAX_PARALLEL=4` with per-target locks |
-| 3 | Deployment | `deploy/deploy.sh` - polls `main` on a timer, rebuilds the inactive colour, waits for the Docker healthcheck (which passes only once the wiki is indexed), swaps the Caddy upstream. **Nothing sits between the merge and the swap but that healthcheck.** A hold file on the host stops the flip (built, checked, not live) and is the whole of the manual brake. Rollback is flipping it back. The live wiki is a host folder the service watches, mounted into both colours; documents do not go through this path |
+| 3 | Deployment | Product-specific, under that product's own `deploy/`; none exists while no product is specified. The Virtual Agent's version polled `main` on a timer, rebuilt the inactive colour, waited for a Docker healthcheck, and swapped the Caddy upstream, with a host hold file as the manual brake - a worked example of the shape a deploy step can take, not a mechanism this factory provides |
 | 4 | Guidance layer | `MISSION.md` · `FACTORY_RULES.md` · `CLAUDE.md`, all three protected |
-| 5 | Validation harness | `harness/ci.py`, the whole gate, including the section 4 journey. See below |
+| 5 | Validation harness | `harness/ci.py`, the whole gate, including the section 4 journey, when a product supplies one. See below |
 
 **The orchestrator is deliberately not in this repo.** It holds no state of its own, and
 everything it reads is visible here as issues, PRs and labels. The one bad consequence -
@@ -58,6 +59,12 @@ cannot be argued past:
 
 **Three.** It was two; the third is what closed the gap the previous product carried for
 five months.
+
+*The remainder of this section down to "Incident log" is the Virtual Agent's own record -
+its journey, its measured gate output, its gaps - kept as a worked example of what a
+product's harness produces, not a claim about what runs today. `docs/API.md`,
+`.factory/decisions.md` and the D-NNN references below moved with the product; they no
+longer resolve in this repository.*
 
 ## The end-to-end path
 
